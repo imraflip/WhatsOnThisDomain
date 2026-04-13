@@ -69,9 +69,7 @@ async def run_tool(
     except TimeoutError as e:
         process.kill()
         await process.wait()
-        raise ToolTimeoutError(
-            f"tool '{binary}' exceeded {timeout}s timeout"
-        ) from e
+        raise ToolTimeoutError(f"tool '{binary}' exceeded {timeout}s timeout") from e
 
     return ToolResult(
         command=command,

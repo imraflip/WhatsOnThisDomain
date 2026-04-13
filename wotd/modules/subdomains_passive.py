@@ -5,20 +5,9 @@ from __future__ import annotations
 import asyncio
 
 from wotd.modules.base import Module, ModuleResult
-from wotd.parsers import parse_lines
+from wotd.parsers import normalize_hosts, parse_lines
 from wotd.store import upsert_subdomains
 from wotd.tools import ToolNotFoundError, ToolResult, run_tool
-
-
-def _normalize(hosts: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for h in hosts:
-        h = h.strip().lower().rstrip(".")
-        if h and h not in seen:
-            seen.add(h)
-            out.append(h)
-    return sorted(out)
 
 
 async def _run_subfinder(root: str) -> ToolResult:
@@ -47,26 +36,18 @@ class SubdomainsPassiveModule(Module):
         for tool_name, result in zip(tasks.keys(), results, strict=True):
             if isinstance(result, BaseException):
                 errors[tool_name] = (
-                    "not installed"
-                    if isinstance(result, ToolNotFoundError)
-                    else str(result)
+                    "not installed" if isinstance(result, ToolNotFoundError) else str(result)
                 )
                 per_tool[tool_name] = 0
                 continue
-            hosts = _normalize(parse_lines(result.stdout))
+            hosts = normalize_hosts(parse_lines(result.stdout))
             per_tool[tool_name] = len(hosts)
             for h in hosts:
                 host_to_sources.setdefault(h, set()).add(tool_name)
 
-        in_scope = {
-            h: srcs
-            for h, srcs in host_to_sources.items()
-            if self.scope.is_in_scope(h)
-        }
+        in_scope = {h: srcs for h, srcs in host_to_sources.items() if self.scope.is_in_scope(h)}
 
-        new_count, existing_count = await upsert_subdomains(
-            self.session, self.target.id, in_scope
-        )
+        new_count, existing_count = await upsert_subdomains(self.session, self.target.id, in_scope)
 
         return ModuleResult(
             module=self.name,

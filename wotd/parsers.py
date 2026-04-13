@@ -11,6 +11,18 @@ def parse_lines(output: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def normalize_hosts(hosts: list[str]) -> list[str]:
+    """Lowercase, strip whitespace, drop trailing dots, dedupe, sort."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in hosts:
+        h = h.strip().lower().rstrip(".")
+        if h and h not in seen:
+            seen.add(h)
+            out.append(h)
+    return sorted(out)
+
+
 def parse_jsonl(output: str) -> list[dict[str, Any]]:
     """Parse JSON Lines output (one JSON object per line). Invalid lines are skipped."""
     results = []

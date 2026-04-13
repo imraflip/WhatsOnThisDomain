@@ -33,9 +33,7 @@ def import_hackerone(source: str | Path) -> Scope:
     data = _load_json(source)
     scope = Scope()
 
-    scopes_data = (
-        data.get("relationships", {}).get("structured_scopes", {}).get("data", [])
-    )
+    scopes_data = data.get("relationships", {}).get("structured_scopes", {}).get("data", [])
 
     for item in scopes_data:
         attrs = item.get("attributes", {})

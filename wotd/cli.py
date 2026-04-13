@@ -30,9 +30,7 @@ async def _run_subdomains_passive(target_name: str) -> None:
     async with session_factory() as session:
         target = await get_target_by_name(session, target_name)
         if target is None:
-            target = await create_target(
-                session, name=target_name, root_domains=[target_name]
-            )
+            target = await create_target(session, name=target_name, root_domains=[target_name])
 
         scope = Scope(
             includes=[

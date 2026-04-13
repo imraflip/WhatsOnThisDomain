@@ -20,9 +20,7 @@ async def test_passive_enum() -> None:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with session_factory() as session:
-        target = await create_target(
-            session, name="hackerone.com", root_domains=["hackerone.com"]
-        )
+        target = await create_target(session, name="hackerone.com", root_domains=["hackerone.com"])
         scope = Scope(
             includes=[
                 ScopeRule(pattern="*.hackerone.com", rule_type=RuleType.WILDCARD),
@@ -37,8 +35,8 @@ async def test_passive_enum() -> None:
 
         rows = (await session.execute(Subdomain.__table__.select())).all()
         hosts = {row.host for row in rows}
-        assert "api.hackerone.com" in hosts, (
-            f"expected api.hackerone.com in results, got sample: {sorted(hosts)[:20]}"
-        )
+        assert (
+            "api.hackerone.com" in hosts
+        ), f"expected api.hackerone.com in results, got sample: {sorted(hosts)[:20]}"
 
     await engine.dispose()
