@@ -1,7 +1,7 @@
 services:
   wotd:
     build: .
-    image: wotd:dev
+    image: wotd
     volumes:
       - ./wotd:/app/wotd
       - ./tests:/app/tests
@@ -12,7 +12,7 @@ services:
 
   dev:
     build: .
-    image: wotd:dev
+    image: wotd
     entrypoint: []
     command: bash
     volumes:

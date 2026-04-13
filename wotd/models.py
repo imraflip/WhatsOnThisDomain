@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -43,3 +43,21 @@ class ScanRun(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     target: Mapped[Target] = relationship(back_populates="scan_runs")
+
+
+class Subdomain(Base):
+    __tablename__ = "subdomains"
+    __table_args__ = (UniqueConstraint("target_id", "host", name="uq_subdomain_target_host"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )

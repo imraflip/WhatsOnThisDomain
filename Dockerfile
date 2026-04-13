@@ -3,13 +3,14 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GOPATH=/root/go \
-    PATH=/root/go/bin:/usr/local/go/bin:/root/.local/bin:$PATH
+    PATH=/app/.venv/bin:/root/go/bin:/usr/local/go/bin:/root/.local/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         build-essential \
+        sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go
