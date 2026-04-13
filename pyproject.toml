@@ -19,10 +19,6 @@ dependencies = [
     "platformdirs>=4",
 ]
 
-[project.scripts]
-wotd = "wotd.cli:app"
-whatsonthisdomain = "wotd.cli:app"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -38,6 +34,7 @@ dev = [
     "pre-commit>=4",
     "mypy>=1.11",
     "types-pyyaml>=6",
+    "pytest-retry>=1.6",
 ]
 
 [tool.ruff]

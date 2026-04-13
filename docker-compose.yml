@@ -1,0 +1,17 @@
+services:
+  wotd:
+    build: .
+    image: wotd:dev
+    volumes:
+      - ./wotd:/app/wotd
+      - ./tests:/app/tests
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - wotd-config:/root/.config/wotd
+      - wotd-data:/root/.local/share/wotd
+    stdin_open: true
+    tty: true
+
+volumes:
+  wotd-config:
+  wotd-data:
