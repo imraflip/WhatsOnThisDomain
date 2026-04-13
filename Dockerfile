@@ -20,13 +20,15 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
 # Install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Install recon tools used by current milestones
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+    && go install github.com/tomnomnom/assetfinder@latest
+
 WORKDIR /app
 
 # Install Python dependencies first for better layer caching
 COPY pyproject.toml uv.lock README.md ./
 COPY wotd/ ./wotd/
-COPY alembic/ ./alembic/
-COPY alembic.ini ./
 
 RUN uv sync --frozen
 

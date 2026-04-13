@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+
 import typer
 from rich.console import Console
+
+from wotd.db import get_session_factory, init_db
+from wotd.modules.subdomains_passive import SubdomainsPassiveModule
+from wotd.scope import RuleType, Scope, ScopeRule
+from wotd.store import (
+    create_target,
+    finish_scan_run,
+    get_target_by_name,
+    start_scan_run,
+)
 
 app = typer.Typer(
     name="wotd",
@@ -11,13 +23,41 @@ app = typer.Typer(
 console = Console()
 
 
+async def _run_subdomains_passive(target_name: str) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(
+                session, name=target_name, root_domains=[target_name]
+            )
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        scan_run = await start_scan_run(session, target.id, "subdomains_passive")
+        module = SubdomainsPassiveModule(session, target, scope)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]done[/green] {result.stats}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+
 @app.command()
 def subdomains(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com or *.acme.com)"),
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
 ) -> None:
-    """Run subdomain enumeration against a target."""
-    console.print(f"[yellow]subdomains module not implemented yet[/yellow] (target: {target})")
-    raise typer.Exit(code=1)
+    """Run passive subdomain enumeration against a target."""
+    asyncio.run(_run_subdomains_passive(target))
 
 
 @app.command()

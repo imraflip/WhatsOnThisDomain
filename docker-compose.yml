@@ -5,8 +5,19 @@ services:
     volumes:
       - ./wotd:/app/wotd
       - ./tests:/app/tests
-      - ./alembic:/app/alembic
-      - ./alembic.ini:/app/alembic.ini
+      - wotd-config:/root/.config/wotd
+      - wotd-data:/root/.local/share/wotd
+    stdin_open: true
+    tty: true
+
+  dev:
+    build: .
+    image: wotd:dev
+    entrypoint: []
+    command: bash
+    volumes:
+      - ./wotd:/app/wotd
+      - ./tests:/app/tests
       - wotd-config:/root/.config/wotd
       - wotd-data:/root/.local/share/wotd
     stdin_open: true
