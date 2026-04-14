@@ -41,9 +41,7 @@ async def test_refreshes_when_stale(tmp_path: Path) -> None:
     stale_time = time.time() - 48 * 3600
     os.utime(target, (stale_time, stale_time))
 
-    with patch(
-        "httpx.AsyncClient.get", new=AsyncMock(return_value=_fake_response(b"new"))
-    ):
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_fake_response(b"new"))):
         refreshed = await ensure_resolvers_fresh(target, max_age_hours=24)
     assert refreshed is True
     assert target.read_bytes() == b"new"

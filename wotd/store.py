@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from wotd.models import DnsRecord, ScanRun, Subdomain, Target
+from wotd.models import DnsRecord, HttpService, ScanRun, Subdomain, Target
 
 
 async def create_target(
@@ -107,9 +108,7 @@ async def upsert_subdomains(
 
 async def get_subdomain_hosts(session: AsyncSession, target_id: int) -> list[str]:
     """Return every known subdomain host for a target."""
-    result = await session.execute(
-        select(Subdomain.host).where(Subdomain.target_id == target_id)
-    )
+    result = await session.execute(select(Subdomain.host).where(Subdomain.target_id == target_id))
     return [row[0] for row in result.all()]
 
 
@@ -128,12 +127,8 @@ async def upsert_dns_records(
 
     unique_records = {(h, t, v) for h, t, v in records}
 
-    result = await session.execute(
-        select(DnsRecord).where(DnsRecord.target_id == target_id)
-    )
-    existing = {
-        (row.host, row.record_type, row.value): row for row in result.scalars().all()
-    }
+    result = await session.execute(select(DnsRecord).where(DnsRecord.target_id == target_id))
+    existing = {(row.host, row.record_type, row.value): row for row in result.scalars().all()}
 
     now = datetime.now(UTC)
     new_count = 0
@@ -158,6 +153,69 @@ async def upsert_dns_records(
 
     await session.commit()
     return (new_count, existing_count)
+
+
+async def get_resolved_hosts(session: AsyncSession, target_id: int) -> list[str]:
+    """Return distinct hosts that have at least one DNS record for this target."""
+    result = await session.execute(
+        select(DnsRecord.host).where(DnsRecord.target_id == target_id).distinct()
+    )
+    return [row[0] for row in result.all()]
+
+
+async def upsert_http_services(
+    session: AsyncSession,
+    target_id: int,
+    services: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Insert or refresh http_service rows.
+
+    Each dict must contain 'host' and 'url'; other fields are optional.
+    Returns (new_count, existing_count).
+    """
+    if not services:
+        return (0, 0)
+
+    urls = [str(s["url"]) for s in services]
+    result = await session.execute(
+        select(HttpService).where(
+            HttpService.target_id == target_id,
+            HttpService.url.in_(urls),
+        )
+    )
+    existing = {row.url: row for row in result.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    for svc in services:
+        url = str(svc["url"])
+        row = existing.get(url)
+        if row is None:
+            session.add(
+                HttpService(
+                    target_id=target_id,
+                    host=str(svc["host"]),
+                    url=url,
+                    status_code=svc.get("status_code"),
+                    title=svc.get("title"),
+                    tech=svc.get("tech"),
+                    content_length=svc.get("content_length"),
+                    final_url=svc.get("final_url"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.status_code = svc.get("status_code")
+            row.title = svc.get("title")
+            row.tech = svc.get("tech")
+            row.content_length = svc.get("content_length")
+            row.final_url = svc.get("final_url")
+            row.last_seen_at = now
+
+    await session.commit()
+    return (new_count, len(existing))
 
 
 async def get_previous_scan_run(

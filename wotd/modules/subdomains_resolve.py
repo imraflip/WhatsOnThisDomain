@@ -55,9 +55,7 @@ class SubdomainsResolveModule(Module):
         except ToolNotFoundError:
             errors["dnsx"] = "not installed"
 
-        new_count, existing_count = await upsert_dns_records(
-            self.session, self.target.id, records
-        )
+        new_count, existing_count = await upsert_dns_records(self.session, self.target.id, records)
 
         return ModuleResult(
             module=self.name,
