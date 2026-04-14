@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from wotd.models import ScanRun, Subdomain, Target
+from wotd.models import DnsRecord, ScanRun, Subdomain, Target
 
 
 async def create_target(
@@ -103,6 +103,61 @@ async def upsert_subdomains(
 
     await session.commit()
     return (new_count, len(existing))
+
+
+async def get_subdomain_hosts(session: AsyncSession, target_id: int) -> list[str]:
+    """Return every known subdomain host for a target."""
+    result = await session.execute(
+        select(Subdomain.host).where(Subdomain.target_id == target_id)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def upsert_dns_records(
+    session: AsyncSession,
+    target_id: int,
+    records: list[tuple[str, str, str]],
+) -> tuple[int, int]:
+    """Insert new DNS records, refresh last_seen on existing ones.
+
+    records is a list of (host, record_type, value) tuples.
+    Returns (new_count, existing_count).
+    """
+    if not records:
+        return (0, 0)
+
+    unique_records = {(h, t, v) for h, t, v in records}
+
+    result = await session.execute(
+        select(DnsRecord).where(DnsRecord.target_id == target_id)
+    )
+    existing = {
+        (row.host, row.record_type, row.value): row for row in result.scalars().all()
+    }
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for host, record_type, value in unique_records:
+        row = existing.get((host, record_type, value))
+        if row is None:
+            session.add(
+                DnsRecord(
+                    target_id=target_id,
+                    host=host,
+                    record_type=record_type,
+                    value=value,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
 
 
 async def get_previous_scan_run(

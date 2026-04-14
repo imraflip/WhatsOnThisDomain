@@ -8,6 +8,7 @@ from rich.console import Console
 from wotd.db import get_session_factory, init_db
 from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
+from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     create_target,
@@ -40,7 +41,11 @@ async def _run_subdomains_passive(target_name: str) -> None:
             ],
         )
 
-        for module_cls in (SubdomainsPassiveModule, SubdomainsActiveModule):
+        for module_cls in (
+            SubdomainsPassiveModule,
+            SubdomainsActiveModule,
+            SubdomainsResolveModule,
+        ):
             scan_run = await start_scan_run(session, target.id, module_cls.name)
             module = module_cls(session, target, scope)
             try:
