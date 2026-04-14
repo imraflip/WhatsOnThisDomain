@@ -6,6 +6,7 @@ import typer
 from rich.console import Console
 
 from wotd.db import get_session_factory, init_db
+from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
@@ -39,15 +40,18 @@ async def _run_subdomains_passive(target_name: str) -> None:
             ],
         )
 
-        scan_run = await start_scan_run(session, target.id, "subdomains_passive")
-        module = SubdomainsPassiveModule(session, target, scope)
-        try:
-            result = await module.run()
-            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-            console.print(f"[green]done[/green] {result.stats}")
-        except Exception as e:
-            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
-            raise
+        for module_cls in (SubdomainsPassiveModule, SubdomainsActiveModule):
+            scan_run = await start_scan_run(session, target.id, module_cls.name)
+            module = module_cls(session, target, scope)
+            try:
+                result = await module.run()
+                await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+                console.print(f"[green]{module_cls.name}[/green] {result.stats}")
+            except Exception as e:
+                await finish_scan_run(
+                    session, scan_run, "failed", summary={"error": str(e)}
+                )
+                raise
 
 
 @app.command()
