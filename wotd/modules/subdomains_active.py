@@ -12,6 +12,7 @@ from wotd.parsers import normalize_hosts, parse_lines
 from wotd.scope import Scope
 from wotd.store import upsert_subdomains
 from wotd.tools import ToolNotFoundError, run_tool
+from wotd.utils.resolvers import ensure_resolvers_fresh
 
 DEFAULT_WORDLIST = Path("/opt/wotd/wordlists/dns.txt")
 DEFAULT_RESOLVERS = Path("/opt/wotd/resolvers.txt")
@@ -38,8 +39,11 @@ class SubdomainsActiveModule(Module):
 
         if not self.wordlist.exists():
             errors["wordlist"] = f"missing: {self.wordlist}"
-        if not self.resolvers.exists():
-            errors["resolvers"] = f"missing: {self.resolvers}"
+
+        try:
+            await ensure_resolvers_fresh(self.resolvers)
+        except Exception as e:
+            errors["resolvers"] = f"refresh failed: {e}"
 
         hosts: list[str] = []
         if not errors:
@@ -47,10 +51,14 @@ class SubdomainsActiveModule(Module):
                 result = await run_tool(
                     "shuffledns",
                     [
-                        "-d", root,
-                        "-w", str(self.wordlist),
-                        "-r", str(self.resolvers),
-                        "-mode", "bruteforce",
+                        "-d",
+                        root,
+                        "-w",
+                        str(self.wordlist),
+                        "-r",
+                        str(self.resolvers),
+                        "-mode",
+                        "bruteforce",
                         "-silent",
                     ],
                     timeout=1800.0,

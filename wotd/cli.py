@@ -48,9 +48,7 @@ async def _run_subdomains_passive(target_name: str) -> None:
                 await finish_scan_run(session, scan_run, "completed", summary=result.stats)
                 console.print(f"[green]{module_cls.name}[/green] {result.stats}")
             except Exception as e:
-                await finish_scan_run(
-                    session, scan_run, "failed", summary={"error": str(e)}
-                )
+                await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
                 raise
 
 
