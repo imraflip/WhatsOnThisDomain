@@ -43,7 +43,7 @@ class SubdomainsResolveModule(Module):
         try:
             result = await run_tool(
                 "dnsx",
-                ["-a", "-aaaa", "-cname", "-resp", "-silent", "-json"],
+                ["-a", "-aaaa", "-cname", "-resp", "-silent", "-json", "-t", "500"],
                 stdin_data="\n".join(hosts) + "\n",
                 timeout=1800.0,
             )

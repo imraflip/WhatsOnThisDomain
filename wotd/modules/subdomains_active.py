@@ -60,6 +60,8 @@ class SubdomainsActiveModule(Module):
                         "-mode",
                         "bruteforce",
                         "-silent",
+                        "-t",
+                        "10000",
                     ],
                     timeout=1800.0,
                 )

@@ -35,10 +35,13 @@ RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
     && cp bin/massdns /usr/local/bin/massdns \
     && rm -rf /tmp/massdns
 
-# Fetch wordlist and resolvers for active subdomain enumeration
+# Fetch wordlists and resolvers for active subdomain enumeration.
+# Medium is the default (faster than huge, good coverage). Tiny is used by tests.
 RUN mkdir -p /opt/wotd/wordlists \
-    && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_huge.txt \
+    && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_medium.txt \
         -o /opt/wotd/wordlists/dns.txt \
+    && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_tiny.txt \
+        -o /opt/wotd/wordlists/dns_tiny.txt \
     && curl -fsSL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
         -o /opt/wotd/resolvers.txt
 

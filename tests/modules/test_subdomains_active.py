@@ -14,7 +14,7 @@ from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import create_target
 
-TINY_WORDLIST = Path(__file__).parent.parent / "data" / "wordlists" / "dns_tiny.txt"
+TINY_WORDLIST = Path("/opt/wotd/wordlists/dns_tiny.txt")
 RESOLVERS = Path("/opt/wotd/resolvers.txt")
 
 
