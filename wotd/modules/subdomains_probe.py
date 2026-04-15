@@ -59,7 +59,7 @@ class SubdomainsProbeModule(Module):
 
         try:
             result = await run_tool(
-                "httpx",
+                "httpx-pd",
                 [
                     "-silent",
                     "-json",
