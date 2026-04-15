@@ -10,7 +10,7 @@ services:
     stdin_open: true
     tty: true
 
-  dev:
+  wotd-dev:
     build: .
     image: wotd
     entrypoint: []
