@@ -1,13 +1,85 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from wotd.models import DnsRecord, HttpService, ScanRun, Subdomain, Target
+
+
+@dataclass
+class SubdomainRow:
+    host: str
+    sources: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    status_code: int | None
+    title: str | None
+    url: str | None
+
+
+async def list_subdomains(
+    session: AsyncSession,
+    target_id: int | None = None,
+    since: timedelta | None = None,
+    source: str | None = None,
+    probed_only: bool = True,
+    limit: int | None = None,
+) -> list[SubdomainRow]:
+    """Query subdomains joined with probe data, most recently seen first.
+
+    target_id: restrict to one target, or None for all targets
+    since: only include rows first seen within this window
+    source: only include rows whose sources column contains this tool name
+    probed_only: drop rows with no matching http_services entry
+    limit: cap results (None = no cap)
+    """
+    h = aliased(HttpService)
+    stmt = (
+        select(
+            Subdomain.host,
+            Subdomain.sources,
+            Subdomain.first_seen_at,
+            Subdomain.last_seen_at,
+            h.status_code,
+            h.title,
+            h.url,
+        )
+        .select_from(Subdomain)
+        .outerjoin(h, (h.target_id == Subdomain.target_id) & (h.host == Subdomain.host))
+        .order_by(Subdomain.last_seen_at.desc())
+    )
+
+    if target_id is not None:
+        stmt = stmt.where(Subdomain.target_id == target_id)
+    if since is not None:
+        cutoff = datetime.now(UTC) - since
+        stmt = stmt.where(Subdomain.first_seen_at >= cutoff)
+    if source is not None:
+        stmt = stmt.where(Subdomain.sources.contains(source))
+    if probed_only:
+        stmt = stmt.where(h.id.isnot(None))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    return [
+        SubdomainRow(
+            host=row[0],
+            sources=row[1],
+            first_seen_at=row[2],
+            last_seen_at=row[3],
+            status_code=row[4],
+            title=row[5],
+            url=row[6],
+        )
+        for row in result.all()
+    ]
 
 
 async def create_target(

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_lib
+from datetime import timedelta
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from wotd.db import get_session_factory, init_db
 from wotd.modules.subdomains_active import SubdomainsActiveModule
@@ -12,11 +15,14 @@ from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
+    SubdomainRow,
     create_target,
     finish_scan_run,
     get_target_by_name,
+    list_subdomains,
     start_scan_run,
 )
+from wotd.utils.duration import parse_duration
 
 app = typer.Typer(
     name="wotd",
@@ -65,6 +71,131 @@ def subdomains(
 ) -> None:
     """Run passive subdomain enumeration against a target."""
     asyncio.run(_run_subdomains_passive(target))
+
+
+show_app = typer.Typer(
+    name="show",
+    help="Inspect data stored in the local db.",
+    no_args_is_help=True,
+)
+app.add_typer(show_app)
+
+
+def _render_table(rows: list[SubdomainRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("host", overflow="fold")
+    table.add_column("status", justify="right")
+    table.add_column("title", overflow="fold")
+    table.add_column("first seen", style="dim")
+
+    for r in rows:
+        status = str(r.status_code) if r.status_code is not None else "-"
+        title = r.title or ""
+        first_seen = r.first_seen_at.strftime("%Y-%m-%d %H:%M")
+        table.add_row(r.host, status, title, first_seen)
+    return table
+
+
+def _render_json(rows: list[SubdomainRow]) -> str:
+    return json_lib.dumps(
+        [
+            {
+                "host": r.host,
+                "sources": r.sources.split(","),
+                "status_code": r.status_code,
+                "title": r.title,
+                "url": r.url,
+                "first_seen_at": r.first_seen_at.isoformat(),
+                "last_seen_at": r.last_seen_at.isoformat(),
+            }
+            for r in rows
+        ],
+        indent=2,
+    )
+
+
+async def _show_subdomains(
+    target_name: str | None,
+    since: timedelta | None,
+    source: str | None,
+    include_unprobed: bool,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+
+        rows = await list_subdomains(
+            session,
+            target_id,
+            since=since,
+            source=source,
+            probed_only=not include_unprobed,
+            limit=limit,
+        )
+
+    if as_json:
+        print(_render_json(rows))
+        return
+
+    if not rows:
+        console.print("[yellow]no matching subdomains[/yellow]")
+        return
+
+    console.print(_render_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("subdomains")
+def show_subdomains(
+    target: str | None = typer.Argument(
+        None, help="Target domain (e.g. hackerone.com). Omit to show across all targets."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d, 2w)."
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by a specific source (e.g. subfinder, shuffledns)."
+    ),
+    include_unprobed: bool = typer.Option(
+        False, "--include-unprobed", help="Include hosts with no probe data."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(
+        False, "--all", help="Ignore --since and --limit, show everything."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Output raw JSON instead of a table."
+    ),
+) -> None:
+    """Show subdomains stored in the db for a target."""
+    since_td: timedelta | None
+    effective_limit: int | None
+    if all_rows:
+        since_td = None
+        effective_limit = None
+    else:
+        if since is None:
+            since_td = None
+        else:
+            try:
+                since_td = parse_duration(since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+        effective_limit = None if limit == 0 else limit
+
+    asyncio.run(
+        _show_subdomains(target, since_td, source, include_unprobed, effective_limit, as_json)
+    )
 
 
 @app.command()
