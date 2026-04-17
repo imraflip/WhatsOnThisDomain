@@ -7,17 +7,23 @@ from datetime import timedelta
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotd.db import get_session_factory, init_db
+from wotd.models import HttpService
+from wotd.modules.base import ModuleResult
 from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
+from wotd.notify import NewHost, NotifyPayload, dispatch, format_message
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     SubdomainRow,
     create_target,
     finish_scan_run,
+    get_resolved_hosts,
     get_target_by_name,
     list_subdomains,
     start_scan_run,
@@ -32,7 +38,7 @@ app = typer.Typer(
 console = Console()
 
 
-async def _run_subdomains_passive(target_name: str) -> None:
+async def _run_subdomains(target_name: str, notify: bool = False) -> None:
     await init_db()
     session_factory = get_session_factory()
 
@@ -48,6 +54,7 @@ async def _run_subdomains_passive(target_name: str) -> None:
             ],
         )
 
+        results: dict[str, ModuleResult] = {}
         for module_cls in (
             SubdomainsPassiveModule,
             SubdomainsActiveModule,
@@ -60,17 +67,81 @@ async def _run_subdomains_passive(target_name: str) -> None:
                 result = await module.run()
                 await finish_scan_run(session, scan_run, "completed", summary=result.stats)
                 console.print(f"[green]{module_cls.name}[/green] {result.stats}")
+                results[module_cls.name] = result
             except Exception as e:
                 await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
                 raise
+
+        if not notify:
+            return
+
+        payload = await _build_notify_payload(session, target.id, target_name, results)
+
+    message = format_message(payload)
+    if message:
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+async def _build_notify_payload(
+    session: AsyncSession,
+    target_id: int,
+    target_name: str,
+    results: dict[str, ModuleResult],
+) -> NotifyPayload:
+    new_subs_set: set[str] = set()
+    for module_name in ("subdomains_passive", "subdomains_active"):
+        module_result = results.get(module_name)
+        if module_result:
+            new_subs_set.update(module_result.stats.get("new_hosts", []))
+
+    resolved_hosts = set(await get_resolved_hosts(session, target_id))
+
+    probe_rows = await session.execute(
+        select(HttpService.host, HttpService.status_code).where(
+            HttpService.target_id == target_id
+        )
+    )
+    probed_by_host: dict[str, int | None] = {}
+    for host, code in probe_rows.all():
+        if host not in probed_by_host or (code is not None and probed_by_host[host] is None):
+            probed_by_host[host] = code
+
+    new_hosts: list[NewHost] = []
+    resolved_count = 0
+    probed_count = 0
+    for host in sorted(new_subs_set):
+        if host in probed_by_host:
+            new_hosts.append(
+                NewHost(host=host, status="probed", status_code=probed_by_host[host])
+            )
+            probed_count += 1
+            resolved_count += 1
+        elif host in resolved_hosts:
+            new_hosts.append(NewHost(host=host, status="resolved"))
+            resolved_count += 1
+        else:
+            new_hosts.append(NewHost(host=host, status="found"))
+
+    return NotifyPayload(
+        target=target_name,
+        new_count=len(new_subs_set),
+        resolved_count=resolved_count,
+        probed_count=probed_count,
+        new_hosts=new_hosts,
+    )
 
 
 @app.command()
 def subdomains(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
 ) -> None:
-    """Run passive subdomain enumeration against a target."""
-    asyncio.run(_run_subdomains_passive(target))
+    """Run subdomain enumeration against a target."""
+    asyncio.run(_run_subdomains(target, notify))
 
 
 show_app = typer.Typer(

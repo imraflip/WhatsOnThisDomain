@@ -47,7 +47,9 @@ class SubdomainsPassiveModule(Module):
 
         in_scope = {h: srcs for h, srcs in host_to_sources.items() if self.scope.is_in_scope(h)}
 
-        new_count, existing_count = await upsert_subdomains(self.session, self.target.id, in_scope)
+        new_count, existing_count, new_hosts = await upsert_subdomains(
+            self.session, self.target.id, in_scope
+        )
 
         return ModuleResult(
             module=self.name,
@@ -57,6 +59,7 @@ class SubdomainsPassiveModule(Module):
                 "in_scope": len(in_scope),
                 "new": new_count,
                 "existing": existing_count,
+                "new_hosts": new_hosts,
                 "errors": errors,
             },
         )

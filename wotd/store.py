@@ -137,13 +137,13 @@ async def upsert_subdomains(
     session: AsyncSession,
     target_id: int,
     host_to_sources: dict[str, set[str]],
-) -> tuple[int, int]:
+) -> tuple[int, int, list[str]]:
     """Insert new subdomains, update sources and last_seen on existing ones.
 
-    Returns (new_count, existing_count).
+    Returns (new_count, existing_count, new_hosts).
     """
     if not host_to_sources:
-        return (0, 0)
+        return (0, 0, [])
 
     hosts = list(host_to_sources.keys())
     result = await session.execute(
@@ -155,7 +155,7 @@ async def upsert_subdomains(
     existing = {row.host: row for row in result.scalars().all()}
 
     now = datetime.now(UTC)
-    new_count = 0
+    new_hosts: list[str] = []
     for host, sources in host_to_sources.items():
         row = existing.get(host)
         if row is None:
@@ -168,14 +168,14 @@ async def upsert_subdomains(
                     last_seen_at=now,
                 )
             )
-            new_count += 1
+            new_hosts.append(host)
         else:
             merged = set(row.sources.split(",")) | sources
             row.sources = ",".join(sorted(merged))
             row.last_seen_at = now
 
     await session.commit()
-    return (new_count, len(existing))
+    return (len(new_hosts), len(existing), new_hosts)
 
 
 async def get_subdomain_hosts(session: AsyncSession, target_id: int) -> list[str]:

@@ -27,7 +27,8 @@ RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
     && go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest \
     && go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
     && go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
-    && mv /root/go/bin/httpx /root/go/bin/httpx-pd
+    && mv /root/go/bin/httpx /root/go/bin/httpx-pd \
+    && go install github.com/projectdiscovery/notify/cmd/notify@latest
 
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \

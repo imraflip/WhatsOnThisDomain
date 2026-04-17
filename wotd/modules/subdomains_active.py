@@ -72,7 +72,7 @@ class SubdomainsActiveModule(Module):
         in_scope = [h for h in hosts if self.scope.is_in_scope(h)]
         host_to_sources: dict[str, set[str]] = {h: {"shuffledns"} for h in in_scope}
 
-        new_count, existing_count = await upsert_subdomains(
+        new_count, existing_count, new_hosts = await upsert_subdomains(
             self.session, self.target.id, host_to_sources
         )
 
@@ -83,6 +83,7 @@ class SubdomainsActiveModule(Module):
                 "in_scope": len(in_scope),
                 "new": new_count,
                 "existing": existing_count,
+                "new_hosts": new_hosts,
                 "errors": errors,
             },
         )
