@@ -94,9 +94,9 @@ def build_provider_config() -> dict[str, Any] | None:
     return config if config else None
 
 
-MAX_HOST_DISPLAY = 25
-
 STATUS_ORDER = {"probed": 0, "resolved": 1, "found": 2}
+
+DISCORD_CHUNK_LIMIT = 1900
 
 
 def format_message(payload: NotifyPayload) -> str | None:
@@ -113,18 +113,34 @@ def format_message(payload: NotifyPayload) -> str | None:
         ordered = sorted(
             payload.new_hosts, key=lambda h: (STATUS_ORDER.get(h.status, 99), h.host)
         )
-        shown = ordered[:MAX_HOST_DISPLAY]
         parts.append("")
-        for h in shown:
+        for h in ordered:
             if h.status == "probed" and h.status_code is not None:
                 parts.append(f"{h.host} (probed {h.status_code})")
             else:
                 parts.append(f"{h.host} ({h.status})")
-        remaining = len(ordered) - len(shown)
-        if remaining > 0:
-            parts.append(f"(+{remaining} more)")
 
     return "\n".join(parts)
+
+
+def chunk_message(message: str, max_chars: int = DISCORD_CHUNK_LIMIT) -> list[str]:
+    """Split a message into newline-aligned chunks that fit max_chars each."""
+    lines = message.split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 def write_provider_config(config: dict[str, Any]) -> Path:
@@ -141,21 +157,22 @@ async def dispatch(message: str) -> bool:
 
     write_provider_config(config)
 
-    try:
-        result = await run_tool(
-            "notify",
-            ["-silent", "-provider-config", str(NOTIFY_CONFIG_PATH)],
-            stdin_data=message + "\n",
-            timeout=30.0,
-        )
-        if not result.ok:
-            logger.warning("notify exited %d: %s", result.returncode, result.stderr.strip())
+    for chunk in chunk_message(message):
+        try:
+            result = await run_tool(
+                "notify",
+                ["-silent", "-bulk", "-provider-config", str(NOTIFY_CONFIG_PATH)],
+                stdin_data=chunk + "\n",
+                timeout=30.0,
+            )
+            if not result.ok:
+                logger.warning("notify exited %d: %s", result.returncode, result.stderr.strip())
+                return False
+        except ToolNotFoundError:
+            logger.warning("notify tool not installed, skipping notification")
             return False
-    except ToolNotFoundError:
-        logger.warning("notify tool not installed, skipping notification")
-        return False
-    except Exception:
-        logger.exception("notify dispatch failed")
-        return False
+        except Exception:
+            logger.exception("notify dispatch failed")
+            return False
 
     return True

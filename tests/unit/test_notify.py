@@ -3,7 +3,13 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from wotd.notify import NewHost, NotifyPayload, build_provider_config, format_message
+from wotd.notify import (
+    NewHost,
+    NotifyPayload,
+    build_provider_config,
+    chunk_message,
+    format_message,
+)
 
 
 class TestBuildProviderConfig:
@@ -129,7 +135,7 @@ class TestFormatMessage:
         found_idx = msg.index("c.acme.com")
         assert probed_idx < resolved_idx < found_idx
 
-    def test_truncates_long_host_list(self) -> None:
+    def test_includes_all_hosts(self) -> None:
         hosts = [NewHost(host=f"h{i}.acme.com", status="found") for i in range(40)]
         payload = NotifyPayload(
             target="acme.com",
@@ -140,7 +146,9 @@ class TestFormatMessage:
         )
         msg = format_message(payload)
         assert msg is not None
-        assert "(+15 more)" in msg
+        for i in range(40):
+            assert f"h{i}.acme.com (found)" in msg
+        assert "more)" not in msg
 
     def test_probed_without_status_code(self) -> None:
         payload = NotifyPayload(
@@ -153,3 +161,27 @@ class TestFormatMessage:
         msg = format_message(payload)
         assert msg is not None
         assert "a.acme.com (probed)" in msg
+
+
+class TestChunkMessage:
+    def test_short_message_stays_single_chunk(self) -> None:
+        chunks = chunk_message("hello\nworld", max_chars=100)
+        assert chunks == ["hello\nworld"]
+
+    def test_splits_on_newline_boundary(self) -> None:
+        msg = "\n".join(f"line{i}" for i in range(20))
+        chunks = chunk_message(msg, max_chars=30)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert len(chunk) <= 30
+        assert "\n".join(chunks).replace("\n\n", "\n") == msg or sum(
+            c.count("\n") + 1 for c in chunks
+        ) == 20
+
+    def test_preserves_every_line(self) -> None:
+        lines = [f"host{i}.example.com (found)" for i in range(100)]
+        msg = "\n".join(lines)
+        chunks = chunk_message(msg, max_chars=200)
+        rejoined = "\n".join(chunks)
+        for line in lines:
+            assert line in rejoined
