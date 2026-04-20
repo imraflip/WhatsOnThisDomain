@@ -17,7 +17,13 @@ from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
-from wotd.notify import NewHost, NotifyPayload, dispatch, format_message
+from wotd.notify import (
+    NewHost,
+    NotifyPayload,
+    dispatch,
+    format_cli_summary,
+    format_message,
+)
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     SubdomainRow,
@@ -72,16 +78,19 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
                 await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
                 raise
 
-        if not notify:
-            return
-
         payload = await _build_notify_payload(session, target.id, target_name, results)
 
-    message = format_message(payload)
-    if message:
-        sent = await dispatch(message)
-        if sent:
-            console.print("[dim]notification sent[/dim]")
+    summary = format_cli_summary(payload)
+    if summary:
+        console.print()
+        console.print(summary, markup=False)
+
+    if notify:
+        message = format_message(payload)
+        if message:
+            sent = await dispatch(message)
+            if sent:
+                console.print("[dim]notification sent[/dim]")
 
 
 async def _build_notify_payload(
@@ -99,24 +108,36 @@ async def _build_notify_payload(
     resolved_hosts = set(await get_resolved_hosts(session, target_id))
 
     probe_rows = await session.execute(
-        select(HttpService.host, HttpService.status_code).where(
+        select(HttpService.host, HttpService.status_code, HttpService.url).where(
             HttpService.target_id == target_id
         )
     )
-    probed_by_host: dict[str, int | None] = {}
-    for host, code in probe_rows.all():
-        if host not in probed_by_host or (code is not None and probed_by_host[host] is None):
-            probed_by_host[host] = code
+    probed_by_host: dict[str, tuple[int | None, str]] = {}
+    for host, code, url in probe_rows.all():
+        existing = probed_by_host.get(host)
+        if existing is None:
+            probed_by_host[host] = (code, url)
+            continue
+        existing_code, existing_url = existing
+        if existing_code is None and code is not None:
+            probed_by_host[host] = (code, url)
+        elif (
+            code is not None
+            and url.startswith("https://")
+            and not existing_url.startswith("https://")
+        ):
+            probed_by_host[host] = (code, url)
 
     new_hosts: list[NewHost] = []
     resolved_count = 0
-    probed_count = 0
+    live_count = 0
     for host in sorted(new_subs_set):
         if host in probed_by_host:
+            code, url = probed_by_host[host]
             new_hosts.append(
-                NewHost(host=host, status="probed", status_code=probed_by_host[host])
+                NewHost(host=host, status="probed", status_code=code, url=url)
             )
-            probed_count += 1
+            live_count += 1
             resolved_count += 1
         elif host in resolved_hosts:
             new_hosts.append(NewHost(host=host, status="resolved"))
@@ -126,9 +147,9 @@ async def _build_notify_payload(
 
     return NotifyPayload(
         target=target_name,
-        new_count=len(new_subs_set),
+        discovered_count=len(new_subs_set),
         resolved_count=resolved_count,
-        probed_count=probed_count,
+        live_count=live_count,
         new_hosts=new_hosts,
     )
 

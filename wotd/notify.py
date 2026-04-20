@@ -23,14 +23,15 @@ class NewHost:
     host: str
     status: str
     status_code: int | None = None
+    url: str | None = None
 
 
 @dataclass
 class NotifyPayload:
     target: str
-    new_count: int
+    discovered_count: int
     resolved_count: int
-    probed_count: int
+    live_count: int
     new_hosts: list[NewHost] = field(default_factory=list)
 
 
@@ -94,31 +95,82 @@ def build_provider_config() -> dict[str, Any] | None:
     return config if config else None
 
 
-STATUS_ORDER = {"probed": 0, "resolved": 1, "found": 2}
-
 DISCORD_CHUNK_LIMIT = 1900
+CLI_DISPLAY_LIMIT = 8
+
+
+def _header(payload: NotifyPayload) -> str:
+    bits = [f"{payload.resolved_count} newly resolved"]
+    if payload.live_count > 0:
+        bits.append(f"{payload.live_count} newly live")
+    return f"[wotd] {payload.target} — {', '.join(bits)}"
+
+
+def _split_resolved_and_live(
+    payload: NotifyPayload,
+) -> tuple[list[NewHost], list[NewHost]]:
+    resolved = sorted(
+        (h for h in payload.new_hosts if h.status in ("resolved", "probed")),
+        key=lambda h: h.host,
+    )
+    live = sorted(
+        (h for h in payload.new_hosts if h.status == "probed"), key=lambda h: h.host
+    )
+    return resolved, live
+
+
+def _format_live_item(h: NewHost) -> str:
+    code = h.status_code if h.status_code is not None else "?"
+    target = h.url or h.host
+    return f"{target} [{code}]"
+
+
+def format_cli_summary(payload: NotifyPayload) -> str | None:
+    """Compact multi-line summary for the CLI (caps each section at CLI_DISPLAY_LIMIT)."""
+    if payload.resolved_count == 0:
+        return None
+
+    resolved, live = _split_resolved_and_live(payload)
+    parts = [_header(payload)]
+
+    if resolved:
+        shown = resolved[:CLI_DISPLAY_LIMIT]
+        line = ", ".join(h.host for h in shown)
+        remaining = len(resolved) - len(shown)
+        if remaining > 0:
+            line += f", … (+{remaining} more)"
+        parts.append(f"  resolved: {line}")
+
+    if live:
+        shown = live[:CLI_DISPLAY_LIMIT]
+        line = ", ".join(_format_live_item(h) for h in shown)
+        remaining = len(live) - len(shown)
+        if remaining > 0:
+            line += f", … (+{remaining} more)"
+        parts.append(f"  live: {line}")
+
+    return "\n".join(parts)
 
 
 def format_message(payload: NotifyPayload) -> str | None:
-    if payload.new_count == 0:
+    """Full vertical host list for notifications (chunked at dispatch)."""
+    if payload.resolved_count == 0:
         return None
 
-    parts: list[str] = []
-    parts.append(f"[wotd] {payload.target}")
-    parts.append(f"{payload.new_count} new subdomain(s) found")
-    parts.append(f"{payload.resolved_count} resolved")
-    parts.append(f"{payload.probed_count} live (HTTP)")
+    resolved, live = _split_resolved_and_live(payload)
+    parts = [_header(payload)]
 
-    if payload.new_hosts:
-        ordered = sorted(
-            payload.new_hosts, key=lambda h: (STATUS_ORDER.get(h.status, 99), h.host)
-        )
+    if resolved:
         parts.append("")
-        for h in ordered:
-            if h.status == "probed" and h.status_code is not None:
-                parts.append(f"{h.host} (probed {h.status_code})")
-            else:
-                parts.append(f"{h.host} ({h.status})")
+        parts.append("resolved:")
+        for h in resolved:
+            parts.append(h.host)
+
+    if live:
+        parts.append("")
+        parts.append("live:")
+        for h in live:
+            parts.append(_format_live_item(h))
 
     return "\n".join(parts)
 
