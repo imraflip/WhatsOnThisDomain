@@ -38,8 +38,21 @@ from wotd.utils.duration import parse_duration
 
 app = typer.Typer(
     name="wotd",
-    help="Recon and attack surface monitoring pipeline for bug bounty and authorized pentesting.",
+    help=(
+        "Recon and attack surface monitoring pipeline for bug bounty and authorized "
+        "pentesting. Enumerates subdomains, resolves DNS, probes HTTP services, and "
+        "diffs against previous scans so new assets surface automatically."
+    ),
+    epilog=(
+        "**Examples:**\n\n"
+        "- `wotd subdomains acme.com` — passive + active + resolve + probe\n\n"
+        "- `wotd subdomains acme.com --notify` — also send a discord / smtp summary\n\n"
+        "- `wotd show subdomains acme.com` — inspect hosts stored in the db\n\n"
+        "- `wotd show subdomains --since 24h` — rows first seen in the last day"
+    ),
     no_args_is_help=True,
+    add_completion=False,
+    rich_markup_mode="markdown",
 )
 console = Console()
 
