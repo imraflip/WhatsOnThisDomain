@@ -9,7 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from wotd.models import DnsRecord, Endpoint, HttpService, JsFile, ScanRun, Subdomain, Target
+from wotd.models import (
+    DnsRecord,
+    Endpoint,
+    HttpService,
+    JsEndpoint,
+    JsFile,
+    ScanRun,
+    Subdomain,
+    Target,
+)
 
 
 @dataclass
@@ -17,6 +26,17 @@ class JsFileRow:
     url: str
     host: str
     sources: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class JsEndpointRow:
+    url: str
+    host: str
+    method: str | None
+    params: str | None
+    source_js_url: str
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -530,6 +550,104 @@ async def upsert_js_files(
 
     await session.commit()
     return (len(new_urls), len(existing), new_urls)
+
+
+async def get_js_file_urls(session: AsyncSession, target_id: int) -> list[str]:
+    """Return all JS file URLs stored for this target."""
+    result = await session.execute(
+        select(JsFile.url).where(JsFile.target_id == target_id)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def upsert_js_endpoints(
+    session: AsyncSession,
+    target_id: int,
+    endpoints: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Insert new JS endpoints, refresh last_seen on existing ones.
+
+    Each dict must contain 'url', 'host', 'source_js_url'; other fields optional.
+    Returns (new_count, existing_count, new_urls).
+    """
+    if not endpoints:
+        return (0, 0, [])
+
+    urls = [str(e["url"]) for e in endpoints]
+    existing: dict[str, JsEndpoint] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(JsEndpoint).where(
+                JsEndpoint.target_id == target_id,
+                JsEndpoint.url.in_(chunk),
+            )
+        )
+        for ep in result.scalars().all():
+            existing[ep.url] = ep
+
+    now = datetime.now(UTC)
+    new_urls: list[str] = []
+    for e in endpoints:
+        url = str(e["url"])
+        row: JsEndpoint | None = existing.get(url)
+        if row is None:
+            session.add(
+                JsEndpoint(
+                    target_id=target_id,
+                    url=url,
+                    host=str(e["host"]),
+                    method=e.get("method"),
+                    params=e.get("params"),
+                    source_js_url=str(e["source_js_url"]),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_urls.append(url)
+        else:
+            row.method = e.get("method")
+            row.params = e.get("params")
+            row.last_seen_at = now
+
+    await session.commit()
+    return (len(new_urls), len(existing), new_urls)
+
+
+async def list_js_endpoints(
+    session: AsyncSession,
+    target_id: int | None = None,
+    host: str | None = None,
+    limit: int | None = None,
+) -> list[JsEndpointRow]:
+    stmt = select(
+        JsEndpoint.url,
+        JsEndpoint.host,
+        JsEndpoint.method,
+        JsEndpoint.params,
+        JsEndpoint.source_js_url,
+        JsEndpoint.first_seen_at,
+        JsEndpoint.last_seen_at,
+    ).order_by(JsEndpoint.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(JsEndpoint.target_id == target_id)
+    if host is not None:
+        stmt = stmt.where(JsEndpoint.host == host)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        JsEndpointRow(
+            url=r[0],
+            host=r[1],
+            method=r[2],
+            params=r[3],
+            source_js_url=r[4],
+            first_seen_at=r[5],
+            last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
 
 
 async def list_js_files(

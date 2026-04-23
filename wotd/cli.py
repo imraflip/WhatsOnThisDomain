@@ -28,6 +28,7 @@ from wotd.notify import (
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     EndpointRow,
+    JsEndpointRow,
     JsFileRow,
     SubdomainRow,
     create_target,
@@ -36,6 +37,7 @@ from wotd.store import (
     get_target_by_name,
     has_prior_scan,
     list_endpoints,
+    list_js_endpoints,
     list_js_files,
     list_subdomains,
     start_scan_run,
@@ -607,6 +609,78 @@ async def _show_js_files(
 
     console.print(_render_js_files_table(rows))
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+def _render_js_endpoints_table(rows: list[JsEndpointRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("method", style="dim", justify="right")
+    table.add_column("host", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(r.url, r.method or "-", r.host, r.first_seen_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_js_endpoints(
+    target_name: str | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_js_endpoints(session, target_id, host=host, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "method": r.method,
+                        "params": json_lib.loads(r.params) if r.params else [],
+                        "source_js_url": r.source_js_url,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no JS endpoints found[/yellow]")
+        return
+
+    console.print(_render_js_endpoints_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("js-endpoints")
+def show_js_endpoints(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List JS endpoints extracted from discovered JS files."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_js_endpoints(target, host, effective_limit, as_json))
 
 
 @show_app.command("js-files")
