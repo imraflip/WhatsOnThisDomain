@@ -189,6 +189,7 @@ show_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(show_app)
+app.add_typer(show_app, name="ls")
 
 
 def _render_table(rows: list[SubdomainRow]) -> Table:
@@ -327,6 +328,32 @@ def crawl(
         raise typer.Exit(code=2)
     console.print(f"[yellow]crawl module not implemented yet[/yellow] (url: {url})")
     raise typer.Exit(code=1)
+
+
+_EXAMPLES = """\
+[bold]Subdomain enumeration[/bold]
+  wotd subdomains acme.com                    full pipeline (passive → active → resolve → probe)
+  wotd subdomains acme.com --notify                also dispatch discord / smtp notification
+
+[bold]Inspect results[/bold]
+  wotd show subdomains acme.com                    probed hosts, last 25
+  wotd show subdomains acme.com --all              every row, no limit
+  wotd show subdomains acme.com --since 24h        found in the last day
+  wotd show subdomains acme.com --include-unprobed include dns-only (no http data)
+  wotd show subdomains acme.com --source subfinder filter by discovery source
+  wotd show subdomains acme.com --json             raw json output
+  wotd show subdomains                             across all targets
+
+[bold]Notifications[/bold]
+  set WOTD_NOTIFY_DISCORD_WEBHOOK_URL in .env, then pass --notify
+  set WOTD_NOTIFY_SMTP_* vars for email delivery
+"""
+
+
+@app.command()
+def examples() -> None:
+    """Print a cheat-sheet of common commands."""
+    console.print(_EXAMPLES)
 
 
 if __name__ == "__main__":
