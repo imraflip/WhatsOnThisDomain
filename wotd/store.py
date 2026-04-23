@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from wotd.models import DnsRecord, HttpService, ScanRun, Subdomain, Target
+from wotd.models import DnsRecord, Endpoint, HttpService, ScanRun, Subdomain, Target
 
 
 @dataclass
@@ -284,6 +284,54 @@ async def upsert_http_services(
             row.tech = svc.get("tech")
             row.content_length = svc.get("content_length")
             row.final_url = svc.get("final_url")
+            row.last_seen_at = now
+
+    await session.commit()
+    return (new_count, len(existing))
+
+
+async def upsert_endpoints(
+    session: AsyncSession,
+    target_id: int,
+    endpoints: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Insert new endpoints, refresh last_seen on existing ones.
+
+    Each dict must contain 'url', 'host', and 'source'; other fields optional.
+    Returns (new_count, existing_count).
+    """
+    if not endpoints:
+        return (0, 0)
+
+    urls = [str(e["url"]) for e in endpoints]
+    result = await session.execute(
+        select(Endpoint).where(
+            Endpoint.target_id == target_id,
+            Endpoint.url.in_(urls),
+        )
+    )
+    existing = {row.url: row for row in result.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    for ep in endpoints:
+        url = str(ep["url"])
+        row = existing.get(url)
+        if row is None:
+            session.add(
+                Endpoint(
+                    target_id=target_id,
+                    url=url,
+                    host=str(ep["host"]),
+                    source=str(ep["source"]),
+                    status_code=ep.get("status_code"),
+                    content_type=ep.get("content_type"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
             row.last_seen_at = now
 
     await session.commit()

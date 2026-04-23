@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from wotd.db import get_session_factory, init_db
 from wotd.models import HttpService
 from wotd.modules.base import ModuleResult
+from wotd.modules.crawl import CrawlModule
 from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
@@ -313,21 +314,53 @@ def show_subdomains(
     )
 
 
+async def _run_crawl(url: str) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target = await get_target_by_name(session, root)
+        if target is None:
+            target = await create_target(session, name=root, root_domains=[root])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        scan_run = await start_scan_run(session, target.id, CrawlModule.name)
+        module = CrawlModule(session, target, scope, url)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{CrawlModule.name}[/green] {result.stats}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+
 @app.command()
 def crawl(
     url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
 ) -> None:
-    """[Planned] Crawl endpoints on a live target URL.
+    """Crawl endpoints on a live target URL.
 
-    Not yet implemented — scheduled for a future milestone.
+    Runs passive and active crawlers against the target, deduplicates discovered
+    URLs, and stores new endpoints in the local database.
     """
     if "://" not in url:
         console.print(
             "[red]error:[/red] crawl requires a full URL with scheme (e.g. https://acme.com)"
         )
         raise typer.Exit(code=2)
-    console.print(f"[yellow]crawl module not implemented yet[/yellow] (url: {url})")
-    raise typer.Exit(code=1)
+    asyncio.run(_run_crawl(url))
 
 
 _EXAMPLES = """\
