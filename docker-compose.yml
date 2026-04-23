@@ -14,23 +14,6 @@ services:
     stdin_open: true
     tty: true
 
-  wotd-dev:
-    build: .
-    image: wotd
-    entrypoint: []
-    command: bash
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - ./wotd:/app/wotd
-      - ./tests:/app/tests
-      - wotd-config:/root/.config/wotd
-      - wotd-data:/root/.local/share/wotd
-      - wotd-notify-config:/root/.config/notify
-    stdin_open: true
-    tty: true
-
 volumes:
   wotd-config:
   wotd-data:
