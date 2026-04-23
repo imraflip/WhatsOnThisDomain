@@ -40,3 +40,6 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+
+# Docs (kept locally, not tracked in origin)
+*.md

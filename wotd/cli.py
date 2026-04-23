@@ -174,13 +174,18 @@ def subdomains(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
 ) -> None:
-    """Run subdomain enumeration against a target."""
+    """Enumerate subdomains for a target domain.
+
+    Runs the full pipeline in order: passive sources (subfinder), active
+    brute-force (shuffledns), DNS resolution, and HTTP probing (httpx). New
+    hosts are diffed against the previous scan and persisted to the local db.
+    """
     asyncio.run(_run_subdomains(target, notify))
 
 
 show_app = typer.Typer(
     name="show",
-    help="Inspect data stored in the local db.",
+    help="Query data stored in the local database.",
     no_args_is_help=True,
 )
 app.add_typer(show_app)
@@ -281,7 +286,11 @@ def show_subdomains(
         False, "--json", help="Output raw JSON instead of a table."
     ),
 ) -> None:
-    """Show subdomains stored in the db for a target."""
+    """List subdomains stored in the database.
+
+    Defaults to probed hosts only (HTTP data available). Use --include-unprobed
+    to also show DNS-only results. Omit TARGET to query across all targets.
+    """
     since_td: timedelta | None
     effective_limit: int | None
     if all_rows:
@@ -307,7 +316,10 @@ def show_subdomains(
 def crawl(
     url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
 ) -> None:
-    """Run endpoint discovery against a target URL."""
+    """[Planned] Crawl endpoints on a live target URL.
+
+    Not yet implemented — scheduled for a future milestone.
+    """
     if "://" not in url:
         console.print(
             "[red]error:[/red] crawl requires a full URL with scheme (e.g. https://acme.com)"
