@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotd.models import Target
 from wotd.modules.base import Module, ModuleResult
-from wotd.parsers import parse_lines
+from wotd.parsers import normalize_urls, parse_lines
 from wotd.scope import Scope
 from wotd.store import upsert_endpoints
 from wotd.tools import ToolNotFoundError, ToolResult, run_tool
@@ -43,7 +43,8 @@ async def _run_waymore(domain: str) -> ToolResult:
 async def _run_katana(url: str) -> ToolResult:
     return await run_tool(
         "katana",
-        ["-u", url, "-d", "5", "-jc", "-kf", "all", "-fs", "rdn", "-silent"],
+        ["-u", url, "-d", "5", "-jc", "-kf", "all", "-fs", "rdn", "-silent",
+         "-c", "50", "-rl", "300"],
         timeout=None,
     )
 
@@ -51,7 +52,7 @@ async def _run_katana(url: str) -> ToolResult:
 async def _run_gospider(url: str) -> ToolResult:
     return await run_tool(
         "gospider",
-        ["-s", url, "-d", "3", "-c", "10", "--js", "--sitemap", "--robots", "-q"],
+        ["-s", url, "-d", "3", "-c", "50", "--js", "--sitemap", "--robots", "-q"],
         timeout=None,
     )
 
@@ -59,7 +60,7 @@ async def _run_gospider(url: str) -> ToolResult:
 async def _run_hakrawler(url: str) -> ToolResult:
     return await run_tool(
         "hakrawler",
-        ["-d", "3", "-subs"],
+        ["-d", "3", "-subs", "-t", "20"],
         stdin_data=url + "\n",
         timeout=None,
     )
@@ -96,7 +97,7 @@ class CrawlModule(Module):
                     "not installed" if isinstance(result, ToolNotFoundError) else str(result)
                 )
                 continue
-            urls = parse_lines(result.stdout)
+            urls = normalize_urls(parse_lines(result.stdout))
             per_tool[tool_name] = len(urls)
             self._collect(url_to_sources, urls, tool_name)
 
@@ -131,10 +132,7 @@ class CrawlModule(Module):
     ) -> dict[str, set[str]]:
         result = {}
         for url, sources in url_to_sources.items():
-            try:
-                host = urlparse(url).hostname or ""
-            except ValueError:
-                continue
+            host = urlparse(url).hostname or ""
             if host and self.scope.is_in_scope(host):
                 result[url] = sources
         return result
