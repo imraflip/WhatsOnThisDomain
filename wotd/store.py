@@ -397,6 +397,20 @@ async def list_endpoints(
     ]
 
 
+async def has_prior_scan(session: AsyncSession, target_id: int, module: str) -> bool:
+    """Return True if at least one completed scan run exists for this target+module."""
+    result = await session.execute(
+        select(ScanRun.id)
+        .where(
+            ScanRun.target_id == target_id,
+            ScanRun.module == module,
+            ScanRun.status == "completed",
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def get_previous_scan_run(
     session: AsyncSession,
     target_id: int,

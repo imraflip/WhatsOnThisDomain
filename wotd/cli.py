@@ -33,6 +33,7 @@ from wotd.store import (
     finish_scan_run,
     get_resolved_hosts,
     get_target_by_name,
+    has_prior_scan,
     list_endpoints,
     list_subdomains,
     start_scan_run,
@@ -77,6 +78,8 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
             ],
         )
 
+        is_first = not await has_prior_scan(session, target.id, SubdomainsPassiveModule.name)
+
         results: dict[str, ModuleResult] = {}
         for module_cls in (
             SubdomainsPassiveModule,
@@ -102,7 +105,9 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
         console.print()
         console.print(summary, markup=False)
 
-    if notify:
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify:
         message = format_message(payload)
         if message:
             sent = await dispatch(message)
@@ -425,6 +430,8 @@ async def _run_crawl(url: str, notify: bool = False) -> None:
             ],
         )
 
+        is_first = not await has_prior_scan(session, target.id, CrawlModule.name)
+
         scan_run = await start_scan_run(session, target.id, CrawlModule.name)
         module = CrawlModule(session, target, scope, url)
         try:
@@ -446,7 +453,9 @@ async def _run_crawl(url: str, notify: bool = False) -> None:
                 summary += f"\n… (+{new_count - 8} more)"
         console.print(summary, markup=False)
 
-    if notify and new_count:
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
         message = f"[wotd] {root} — {new_count} new endpoints\n\n" + "\n".join(new_urls)
         sent = await dispatch(message)
         if sent:
