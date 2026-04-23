@@ -290,6 +290,9 @@ async def upsert_http_services(
     return (new_count, len(existing))
 
 
+_SQLITE_MAX_VARS = 500
+
+
 async def upsert_endpoints(
     session: AsyncSession,
     target_id: int,
@@ -303,21 +306,26 @@ async def upsert_endpoints(
     if not endpoints:
         return (0, 0)
 
+    # Fetch existing rows in batches to stay under SQLite's variable limit.
+    existing: dict[str, Endpoint | None] = {}
     urls = [str(e["url"]) for e in endpoints]
-    result = await session.execute(
-        select(Endpoint).where(
-            Endpoint.target_id == target_id,
-            Endpoint.url.in_(urls),
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(Endpoint).where(
+                Endpoint.target_id == target_id,
+                Endpoint.url.in_(chunk),
+            )
         )
-    )
-    existing = {row.url: row for row in result.scalars().all()}
+        for row in result.scalars().all():
+            existing[row.url] = row
 
     now = datetime.now(UTC)
     new_count = 0
     for ep in endpoints:
         url = str(ep["url"])
-        row = existing.get(url)
-        if row is None:
+        existing_row: Endpoint | None = existing.get(url)
+        if existing_row is None:
             session.add(
                 Endpoint(
                     target_id=target_id,
@@ -332,7 +340,7 @@ async def upsert_endpoints(
             )
             new_count += 1
         else:
-            row.last_seen_at = now
+            existing_row.last_seen_at = now
 
     await session.commit()
     return (new_count, len(existing))

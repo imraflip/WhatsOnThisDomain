@@ -2,14 +2,42 @@
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotd.models import Target
 from wotd.modules.base import Module, ModuleResult
+from wotd.parsers import parse_lines
 from wotd.scope import Scope
 from wotd.store import upsert_endpoints
+from wotd.tools import ToolNotFoundError, ToolResult, run_tool
+
+
+async def _run_waybackurls(domain: str) -> ToolResult:
+    return await run_tool(
+        "waybackurls",
+        [],
+        stdin_data=domain + "\n",
+        timeout=None,
+    )
+
+
+async def _run_gau(domain: str) -> ToolResult:
+    return await run_tool(
+        "gau",
+        ["--subs", domain],
+        timeout=None,
+    )
+
+
+async def _run_waymore(domain: str) -> ToolResult:
+    return await run_tool(
+        "waymore",
+        ["-i", domain, "-mode", "U", "-nlf"],
+        timeout=600.0,
+    )
 
 
 class CrawlModule(Module):
@@ -20,10 +48,29 @@ class CrawlModule(Module):
         self.url = url
 
     async def run(self) -> ModuleResult:
-        url_to_sources: dict[str, set[str]] = {}
+        parsed = urlparse(self.url)
+        domain = parsed.hostname or parsed.netloc
 
-        # Tool runners will be added in M17 and M18.
-        # Each will call _collect(results, source_name) below.
+        tasks = {
+            "waybackurls": _run_waybackurls(domain),
+            "gau": _run_gau(domain),
+            "waymore": _run_waymore(domain),
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+        url_to_sources: dict[str, set[str]] = {}
+        per_tool: dict[str, int] = {}
+        errors: dict[str, str] = {}
+
+        for tool_name, result in zip(tasks.keys(), results, strict=True):
+            if isinstance(result, BaseException):
+                errors[tool_name] = (
+                    "not installed" if isinstance(result, ToolNotFoundError) else str(result)
+                )
+                continue
+            urls = parse_lines(result.stdout)
+            per_tool[tool_name] = len(urls)
+            self._collect(url_to_sources, urls, tool_name)
 
         in_scope = self._filter_urls(url_to_sources)
         endpoints = [
@@ -34,15 +81,16 @@ class CrawlModule(Module):
             self.session, self.target.id, endpoints
         )
 
-        return ModuleResult(
-            module=self.name,
-            stats={
-                "total": len(url_to_sources),
-                "in_scope": len(in_scope),
-                "new_endpoints": new_count,
-                "existing_endpoints": existing_count,
-            },
-        )
+        stats: dict[str, object] = {
+            "total": len(url_to_sources),
+            "in_scope": len(in_scope),
+            "new_endpoints": new_count,
+            "existing_endpoints": existing_count,
+            **per_tool,
+        }
+        if errors:
+            stats["errors"] = errors
+        return ModuleResult(module=self.name, stats=stats)
 
     def _collect(
         self, url_to_sources: dict[str, set[str]], urls: list[str], source: str

@@ -30,6 +30,12 @@ RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
     && mv /root/go/bin/httpx /root/go/bin/httpx-pd \
     && go install github.com/projectdiscovery/notify/cmd/notify@latest
 
+# Passive URL crawl tools
+RUN go install github.com/tomnomnom/waybackurls@latest \
+    && go install github.com/lc/gau/v2/cmd/gau@latest
+
+RUN pip install --no-cache-dir waymore
+
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \
     && cd /tmp/massdns && make \
