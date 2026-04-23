@@ -15,15 +15,6 @@ from wotd.store import upsert_endpoints
 from wotd.tools import ToolNotFoundError, ToolResult, run_tool
 
 
-async def _run_waybackurls(domain: str) -> ToolResult:
-    return await run_tool(
-        "waybackurls",
-        [],
-        stdin_data=domain + "\n",
-        timeout=None,
-    )
-
-
 async def _run_gau(domain: str) -> ToolResult:
     return await run_tool(
         "gau",
@@ -78,7 +69,6 @@ class CrawlModule(Module):
         domain = parsed.hostname or parsed.netloc
 
         tasks = {
-            "waybackurls": _run_waybackurls(domain),
             "gau": _run_gau(domain),
             "waymore": _run_waymore(domain),
             "katana": _run_katana(self.url),
