@@ -49,9 +49,10 @@ app = typer.Typer(
     epilog=(
         "**Examples:**\n\n"
         "- `wotd subdomains acme.com` — passive + active + resolve + probe\n\n"
-        "- `wotd subdomains acme.com --notify` — also send a discord / smtp summary\n\n"
+        "- `wotd crawl https://acme.com` — crawl endpoints from all sources\n\n"
         "- `wotd show subdomains acme.com` — inspect hosts stored in the db\n\n"
-        "- `wotd show subdomains --since 24h` — rows first seen in the last day"
+        "- `wotd show endpoints acme.com` — inspect crawled endpoints\n\n"
+        "- `wotd examples` — full cheat-sheet"
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -474,17 +475,33 @@ def crawl(
 
 _EXAMPLES = """\
 [bold]Subdomain enumeration[/bold]
-  wotd subdomains acme.com                    full pipeline (passive → active → resolve → probe)
-  wotd subdomains acme.com --notify                also dispatch discord / smtp notification
+  wotd subdomains acme.com               full pipeline (passive → active → resolve → probe)
+  wotd subdomains acme.com --notify      also dispatch discord / smtp notification
 
-[bold]Inspect results[/bold]
+[bold]Crawl endpoints[/bold]
+  wotd crawl https://acme.com            passive + active crawlers, stores new endpoints
+  wotd crawl https://acme.com --notify   also dispatch notification on new endpoints
+
+[bold]Inspect subdomains[/bold]
   wotd show subdomains acme.com                    probed hosts, last 25
   wotd show subdomains acme.com --all              every row, no limit
   wotd show subdomains acme.com --since 24h        found in the last day
-  wotd show subdomains acme.com --include-unprobed include dns-only (no http data)
+  wotd show subdomains acme.com --include-unprobed include dns-only hosts
   wotd show subdomains acme.com --source subfinder filter by discovery source
   wotd show subdomains acme.com --json             raw json output
   wotd show subdomains                             across all targets
+
+[bold]Inspect endpoints[/bold]
+  wotd show endpoints acme.com                     latest 25 endpoints
+  wotd show endpoints acme.com --all               every endpoint, no limit
+  wotd show endpoints acme.com --since 24h         found in the last day
+  wotd show endpoints acme.com --source katana     filter by crawler
+  wotd show endpoints acme.com --host sub.acme.com filter by host
+  wotd show endpoints acme.com --json              raw json output
+
+[bold]Shortcuts[/bold]
+  wotd ls subdomains acme.com            alias for wotd show subdomains
+  wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Notifications[/bold]
   set WOTD_NOTIFY_DISCORD_WEBHOOK_URL in .env, then pass --notify
