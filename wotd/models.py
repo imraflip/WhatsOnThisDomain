@@ -107,6 +107,25 @@ class Endpoint(Base):
     )
 
 
+class JsFile(Base):
+    __tablename__ = "js_files"
+    __table_args__ = (UniqueConstraint("target_id", "url", name="uq_js_file_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class DnsRecord(Base):
     __tablename__ = "dns_records"
     __table_args__ = (

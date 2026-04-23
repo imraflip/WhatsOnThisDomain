@@ -41,6 +41,13 @@ RUN go install github.com/projectdiscovery/katana/cmd/katana@latest \
     && go install github.com/jaeles-project/gospider@latest \
     && go install github.com/hakluke/hakrawler@latest
 
+# JS discovery tools
+# subjs/getjs: find .js URLs linked from pages (stdin: URLs, stdout: JS URLs)
+# jsluice: extract endpoints and secrets from JS content (JSON output)
+RUN go install github.com/lc/subjs@latest \
+    && go install github.com/003random/getjs@latest \
+    && go install github.com/BishopFox/jsluice/cmd/jsluice@latest
+
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \
     && cd /tmp/massdns && make \

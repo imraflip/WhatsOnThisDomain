@@ -9,7 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from wotd.models import DnsRecord, Endpoint, HttpService, ScanRun, Subdomain, Target
+from wotd.models import DnsRecord, Endpoint, HttpService, JsFile, ScanRun, Subdomain, Target
+
+
+@dataclass
+class JsFileRow:
+    url: str
+    host: str
+    sources: str
+    first_seen_at: datetime
+    last_seen_at: datetime
 
 
 @dataclass
@@ -449,3 +458,104 @@ async def get_previous_scan_run(
     query = query.limit(1)
     result = await session.execute(query)
     return result.scalar_one_or_none()
+
+
+async def get_js_urls_from_endpoints(session: AsyncSession, target_id: int) -> list[str]:
+    """Return .js endpoint URLs already discovered for this target."""
+    result = await session.execute(
+        select(Endpoint.url).where(
+            Endpoint.target_id == target_id,
+            Endpoint.url.like("%.js"),
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def get_http_service_urls(session: AsyncSession, target_id: int) -> list[str]:
+    """Return live HTTP service URLs for this target (for subjs input)."""
+    result = await session.execute(
+        select(HttpService.url).where(HttpService.target_id == target_id)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def upsert_js_files(
+    session: AsyncSession,
+    target_id: int,
+    files: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Insert new JS files, refresh last_seen and update content on existing ones.
+
+    Each dict must contain 'url', 'host', 'sources'; other fields optional.
+    Returns (new_count, existing_count, new_urls).
+    """
+    if not files:
+        return (0, 0, [])
+
+    urls = [str(f["url"]) for f in files]
+    existing: dict[str, JsFile] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(JsFile).where(
+                JsFile.target_id == target_id,
+                JsFile.url.in_(chunk),
+            )
+        )
+        for jf in result.scalars().all():
+            existing[jf.url] = jf
+
+    now = datetime.now(UTC)
+    new_urls: list[str] = []
+    for f in files:
+        url = str(f["url"])
+        row: JsFile | None = existing.get(url)
+        if row is None:
+            session.add(
+                JsFile(
+                    target_id=target_id,
+                    url=url,
+                    host=str(f["host"]),
+                    sources=str(f.get("sources", "")),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_urls.append(url)
+        else:
+            merged = set(row.sources.split(",")) | set(str(f.get("sources", "")).split(","))
+            merged.discard("")
+            row.sources = ",".join(sorted(merged))
+            row.last_seen_at = now
+
+    await session.commit()
+    return (len(new_urls), len(existing), new_urls)
+
+
+async def list_js_files(
+    session: AsyncSession,
+    target_id: int | None = None,
+    limit: int | None = None,
+) -> list[JsFileRow]:
+    stmt = select(
+        JsFile.url,
+        JsFile.host,
+        JsFile.sources,
+        JsFile.first_seen_at,
+        JsFile.last_seen_at,
+    ).order_by(JsFile.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(JsFile.target_id == target_id)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        JsFileRow(
+            url=r[0],
+            host=r[1],
+            sources=r[2],
+            first_seen_at=r[3],
+            last_seen_at=r[4],
+        )
+        for r in result.all()
+    ]

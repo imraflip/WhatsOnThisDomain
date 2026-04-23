@@ -28,6 +28,7 @@ from wotd.notify import (
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     EndpointRow,
+    JsFileRow,
     SubdomainRow,
     create_target,
     finish_scan_run,
@@ -35,6 +36,7 @@ from wotd.store import (
     get_target_by_name,
     has_prior_scan,
     list_endpoints,
+    list_js_files,
     list_subdomains,
     start_scan_run,
 )
@@ -60,6 +62,11 @@ app = typer.Typer(
     rich_markup_mode="markdown",
 )
 console = Console()
+
+
+def _meta(stats: dict) -> dict:  # type: ignore[type-arg]
+    """Strip list values from stats — CLI shows counts only."""
+    return {k: v for k, v in stats.items() if not isinstance(v, list)}
 
 
 async def _run_subdomains(target_name: str, notify: bool = False) -> None:
@@ -92,7 +99,7 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
             try:
                 result = await module.run()
                 await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-                console.print(f"[green]{module_cls.name}[/green] {result.stats}")
+                console.print(f"[green]{module_cls.name}[/green] {_meta(result.stats)}")
                 results[module_cls.name] = result
             except Exception as e:
                 await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
@@ -444,22 +451,13 @@ async def _run_crawl(url: str, notify: bool = False) -> None:
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-            console.print(f"[green]{CrawlModule.name}[/green] {result.stats}")
+            console.print(f"[green]{CrawlModule.name}[/green] {_meta(result.stats)}")
         except Exception as e:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
 
     new_count = result.stats.get("new_endpoints", 0)
-    raw_new_urls = result.stats.get("new_urls", [])
-    new_urls: list[str] = raw_new_urls if isinstance(raw_new_urls, list) else []
-    if new_count:
-        summary = f"[wotd] {root} — {new_count} new endpoints"
-        if new_urls:
-            summary += "\n\n" + "\n".join(new_urls[:8])
-            if new_count > 8:
-                summary += f"\n… (+{new_count - 8} more)"
-        console.print(summary, markup=False)
-
+    new_urls: list[str] = result.stats.get("new_urls", [])
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
     elif notify and new_count:
@@ -487,6 +485,142 @@ def crawl(
         )
         raise typer.Exit(code=2)
     asyncio.run(_run_crawl(url, notify))
+
+
+async def _run_discover_js(url: str, notify: bool = False) -> None:
+    from urllib.parse import urlparse
+
+    from wotd.modules.js_discovery import JsDiscoveryModule
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    root = ".".join(hostname.split(".")[-2:]) if hostname.count(".") >= 1 else hostname
+
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target = await get_target_by_name(session, root)
+        if target is None:
+            target = await create_target(session, name=root, root_domains=[root])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, JsDiscoveryModule.name)
+
+        scan_run = await start_scan_run(session, target.id, JsDiscoveryModule.name)
+        module = JsDiscoveryModule(session, target, scope, seed_urls=[url])
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{JsDiscoveryModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    new_urls: list[str] = result.stats.get("new_urls", [])
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = f"[wotd] {root} — {new_count} new JS files\n\n" + "\n".join(
+            new_urls if isinstance(new_urls, list) else []
+        )
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+@app.command("discover-js")
+def discover_js(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Discover JavaScript files for a target URL.
+
+    Collects .js URLs from the endpoints table and by running subjs and getjs
+    against the provided URL. Scope-filters results and stores discovered
+    URLs in the js_files table. No content is downloaded.
+    """
+    if "://" not in target:
+        console.print(
+            "[red]error:[/red] discover-js requires a full URL with scheme (e.g. https://acme.com)"
+        )
+        raise typer.Exit(code=2)
+    asyncio.run(_run_discover_js(target, notify))
+
+
+def _render_js_files_table(rows: list[JsFileRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("sources", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(r.url, r.sources, r.first_seen_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_js_files(
+    target_name: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_js_files(session, target_id, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "sources": r.sources.split(","),
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no JS files found[/yellow]")
+        return
+
+    console.print(_render_js_files_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("js-files")
+def show_js_files(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List JS files stored in the database."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_js_files(target, effective_limit, as_json))
 
 
 _EXAMPLES = """\
@@ -518,6 +652,11 @@ _EXAMPLES = """\
 [bold]Shortcuts[/bold]
   wotd ls subdomains acme.com            alias for wotd show subdomains
   wotd ls endpoints acme.com             alias for wotd show endpoints
+
+[bold]JS file discovery[/bold]
+  wotd discover-js acme.com              collect JS files from endpoints + subjs
+  wotd discover-js acme.com --notify    also dispatch notification on new JS files
+  wotd show js-files acme.com           inspect downloaded JS files
 
 [bold]Notifications[/bold]
   set WOTD_NOTIFY_DISCORD_WEBHOOK_URL in .env, then pass --notify
