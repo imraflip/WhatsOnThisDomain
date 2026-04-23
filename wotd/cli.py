@@ -314,7 +314,7 @@ def show_subdomains(
     )
 
 
-async def _run_crawl(url: str) -> None:
+async def _run_crawl(url: str, notify: bool = False) -> None:
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
@@ -345,10 +345,30 @@ async def _run_crawl(url: str) -> None:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
 
+    new_count = result.stats.get("new_endpoints", 0)
+    raw_new_urls = result.stats.get("new_urls", [])
+    new_urls: list[str] = raw_new_urls if isinstance(raw_new_urls, list) else []
+    if new_count:
+        summary = f"[wotd] {root} — {new_count} new endpoints"
+        if new_urls:
+            summary += "\n\n" + "\n".join(new_urls[:8])
+            if new_count > 8:
+                summary += f"\n… (+{new_count - 8} more)"
+        console.print(summary, markup=False)
+
+    if notify and new_count:
+        message = f"[wotd] {root} — {new_count} new endpoints\n\n" + "\n".join(new_urls)
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
 
 @app.command()
 def crawl(
     url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the crawl finishes."
+    ),
 ) -> None:
     """Crawl endpoints on a live target URL.
 
@@ -360,7 +380,7 @@ def crawl(
             "[red]error:[/red] crawl requires a full URL with scheme (e.g. https://acme.com)"
         )
         raise typer.Exit(code=2)
-    asyncio.run(_run_crawl(url))
+    asyncio.run(_run_crawl(url, notify))
 
 
 _EXAMPLES = """\

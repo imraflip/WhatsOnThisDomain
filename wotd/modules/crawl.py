@@ -100,11 +100,14 @@ class CrawlModule(Module):
             self.session, self.target.id, endpoints
         )
 
+        new_urls = [ep["url"] for ep in endpoints[:new_count]]
+
         stats: dict[str, object] = {
             "total": len(url_to_sources),
             "in_scope": len(in_scope),
             "new_endpoints": new_count,
             "existing_endpoints": existing_count,
+            "new_urls": new_urls,
             **per_tool,
         }
         if errors:
