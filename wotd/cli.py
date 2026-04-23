@@ -27,11 +27,13 @@ from wotd.notify import (
 )
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
+    EndpointRow,
     SubdomainRow,
     create_target,
     finish_scan_run,
     get_resolved_hosts,
     get_target_by_name,
+    list_endpoints,
     list_subdomains,
     start_scan_run,
 )
@@ -312,6 +314,93 @@ def show_subdomains(
     asyncio.run(
         _show_subdomains(target, since_td, source, include_unprobed, effective_limit, as_json)
     )
+
+
+def _render_endpoints_table(rows: list[EndpointRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("host", overflow="fold")
+    table.add_column("source", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(r.url, r.host, r.source, r.first_seen_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_endpoints(
+    target_name: str | None,
+    since: timedelta | None,
+    source: str | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_endpoints(
+            session, target_id, since=since, source=source, host=host, limit=limit
+        )
+
+    if as_json:
+        import json as json_lib
+        print(json_lib.dumps([
+            {"url": r.url, "host": r.host, "source": r.source,
+             "status_code": r.status_code, "content_type": r.content_type,
+             "first_seen_at": r.first_seen_at.isoformat(),
+             "last_seen_at": r.last_seen_at.isoformat()}
+            for r in rows
+        ], indent=2))
+        return
+
+    if not rows:
+        console.print("[yellow]no matching endpoints[/yellow]")
+        return
+
+    console.print(_render_endpoints_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("endpoints")
+def show_endpoints(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source tool (e.g. gau, katana)."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(
+        False, "--all", help="Ignore --since and --limit, show everything."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List endpoints stored in the database."""
+    if all_rows:
+        since_td: timedelta | None = None
+        effective_limit: int | None = None
+    else:
+        since_td = None
+        if since:
+            try:
+                since_td = parse_duration(since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+        effective_limit = None if limit == 0 else limit
+
+    asyncio.run(_show_endpoints(target, since_td, source, host, effective_limit, as_json))
 
 
 async def _run_crawl(url: str, notify: bool = False) -> None:

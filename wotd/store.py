@@ -13,6 +13,17 @@ from wotd.models import DnsRecord, Endpoint, HttpService, ScanRun, Subdomain, Ta
 
 
 @dataclass
+class EndpointRow:
+    url: str
+    host: str
+    source: str
+    status_code: int | None
+    content_type: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
 class SubdomainRow:
     host: str
     sources: str
@@ -344,6 +355,46 @@ async def upsert_endpoints(
 
     await session.commit()
     return (new_count, len(existing))
+
+
+async def list_endpoints(
+    session: AsyncSession,
+    target_id: int | None = None,
+    since: timedelta | None = None,
+    source: str | None = None,
+    host: str | None = None,
+    limit: int | None = None,
+) -> list[EndpointRow]:
+    stmt = (
+        select(
+            Endpoint.url,
+            Endpoint.host,
+            Endpoint.source,
+            Endpoint.status_code,
+            Endpoint.content_type,
+            Endpoint.first_seen_at,
+            Endpoint.last_seen_at,
+        )
+        .order_by(Endpoint.first_seen_at.desc())
+    )
+    if target_id is not None:
+        stmt = stmt.where(Endpoint.target_id == target_id)
+    if since is not None:
+        stmt = stmt.where(Endpoint.first_seen_at >= datetime.now(UTC) - since)
+    if source is not None:
+        stmt = stmt.where(Endpoint.source.contains(source))
+    if host is not None:
+        stmt = stmt.where(Endpoint.host == host)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        EndpointRow(
+            url=r[0], host=r[1], source=r[2], status_code=r[3],
+            content_type=r[4], first_seen_at=r[5], last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
 
 
 async def get_previous_scan_run(
