@@ -88,9 +88,7 @@ class HttpService(Base):
 
 class Endpoint(Base):
     __tablename__ = "endpoints"
-    __table_args__ = (
-        UniqueConstraint("target_id", "url", name="uq_endpoint_target_url"),
-    )
+    __table_args__ = (UniqueConstraint("target_id", "url", name="uq_endpoint_target_url"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)

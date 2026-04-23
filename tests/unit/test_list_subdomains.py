@@ -116,14 +116,10 @@ async def test_source_filter() -> None:
         )
         await session.commit()
 
-        subf = await list_subdomains(
-            session, target.id, source="subfinder", probed_only=False
-        )
+        subf = await list_subdomains(session, target.id, source="subfinder", probed_only=False)
         assert [r.host for r in subf] == ["a.acme.com"]
 
-        shuf = await list_subdomains(
-            session, target.id, source="shuffledns", probed_only=False
-        )
+        shuf = await list_subdomains(session, target.id, source="shuffledns", probed_only=False)
         assert [r.host for r in shuf] == ["b.acme.com"]
 
 

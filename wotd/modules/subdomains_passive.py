@@ -11,11 +11,11 @@ from wotd.tools import ToolNotFoundError, ToolResult, run_tool
 
 
 async def _run_subfinder(root: str) -> ToolResult:
-    return await run_tool("subfinder", ["-d", root, "-silent"], timeout=600.0)
+    return await run_tool("subfinder", ["-d", root, "-silent"], timeout=None)
 
 
 async def _run_assetfinder(root: str) -> ToolResult:
-    return await run_tool("assetfinder", ["--subs-only", root], timeout=600.0)
+    return await run_tool("assetfinder", ["--subs-only", root], timeout=None)
 
 
 class SubdomainsPassiveModule(Module):

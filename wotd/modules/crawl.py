@@ -34,8 +34,22 @@ async def _run_waymore(domain: str) -> ToolResult:
 async def _run_katana(url: str) -> ToolResult:
     return await run_tool(
         "katana",
-        ["-u", url, "-d", "5", "-jc", "-kf", "all", "-fs", "rdn", "-silent",
-         "-c", "50", "-rl", "300"],
+        [
+            "-u",
+            url,
+            "-d",
+            "5",
+            "-jc",
+            "-kf",
+            "all",
+            "-fs",
+            "rdn",
+            "-silent",
+            "-c",
+            "50",
+            "-rl",
+            "300",
+        ],
         timeout=None,
     )
 
@@ -96,11 +110,9 @@ class CrawlModule(Module):
             {"url": url, "host": urlparse(url).hostname or "", "source": ",".join(sorted(srcs))}
             for url, srcs in in_scope.items()
         ]
-        new_count, existing_count = await upsert_endpoints(
+        new_count, existing_count, new_urls = await upsert_endpoints(
             self.session, self.target.id, endpoints
         )
-
-        new_urls = [ep["url"] for ep in endpoints[:new_count]]
 
         stats: dict[str, object] = {
             "total": len(url_to_sources),
@@ -108,21 +120,17 @@ class CrawlModule(Module):
             "new_endpoints": new_count,
             "existing_endpoints": existing_count,
             "new_urls": new_urls,
-            **per_tool,
+            **{t: per_tool.get(t, 0) for t in tasks},
         }
         if errors:
             stats["errors"] = errors
         return ModuleResult(module=self.name, stats=stats)
 
-    def _collect(
-        self, url_to_sources: dict[str, set[str]], urls: list[str], source: str
-    ) -> None:
+    def _collect(self, url_to_sources: dict[str, set[str]], urls: list[str], source: str) -> None:
         for url in urls:
             url_to_sources.setdefault(url, set()).add(source)
 
-    def _filter_urls(
-        self, url_to_sources: dict[str, set[str]]
-    ) -> dict[str, set[str]]:
+    def _filter_urls(self, url_to_sources: dict[str, set[str]]) -> dict[str, set[str]]:
         result = {}
         for url, sources in url_to_sources.items():
             host = urlparse(url).hostname or ""

@@ -157,18 +157,22 @@ async def upsert_subdomains(
         return (0, 0, [])
 
     hosts = list(host_to_sources.keys())
-    result = await session.execute(
-        select(Subdomain).where(
-            Subdomain.target_id == target_id,
-            Subdomain.host.in_(hosts),
+    existing: dict[str, Subdomain] = {}
+    for i in range(0, len(hosts), _SQLITE_MAX_VARS):
+        chunk = hosts[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(Subdomain).where(
+                Subdomain.target_id == target_id,
+                Subdomain.host.in_(chunk),
+            )
         )
-    )
-    existing = {row.host: row for row in result.scalars().all()}
+        for sd in result.scalars().all():
+            existing[sd.host] = sd
 
     now = datetime.now(UTC)
     new_hosts: list[str] = []
     for host, sources in host_to_sources.items():
-        row = existing.get(host)
+        row: Subdomain | None = existing.get(host)
         if row is None:
             session.add(
                 Subdomain(
@@ -246,6 +250,16 @@ async def get_resolved_hosts(session: AsyncSession, target_id: int) -> list[str]
     return [row[0] for row in result.all()]
 
 
+async def get_unprobed_hosts(session: AsyncSession, target_id: int) -> list[str]:
+    """Return resolved hosts that have no http_services entry yet."""
+    probed = await session.execute(
+        select(HttpService.host).where(HttpService.target_id == target_id).distinct()
+    )
+    probed_set = {row[0] for row in probed.all()}
+    all_resolved = await get_resolved_hosts(session, target_id)
+    return [h for h in all_resolved if h not in probed_set]
+
+
 async def upsert_http_services(
     session: AsyncSession,
     target_id: int,
@@ -308,14 +322,14 @@ async def upsert_endpoints(
     session: AsyncSession,
     target_id: int,
     endpoints: list[dict[str, Any]],
-) -> tuple[int, int]:
+) -> tuple[int, int, list[str]]:
     """Insert new endpoints, refresh last_seen on existing ones.
 
     Each dict must contain 'url', 'host', and 'source'; other fields optional.
-    Returns (new_count, existing_count).
+    Returns (new_count, existing_count, new_urls).
     """
     if not endpoints:
-        return (0, 0)
+        return (0, 0, [])
 
     # Fetch existing rows in batches to stay under SQLite's variable limit.
     existing: dict[str, Endpoint | None] = {}
@@ -332,7 +346,7 @@ async def upsert_endpoints(
             existing[row.url] = row
 
     now = datetime.now(UTC)
-    new_count = 0
+    new_urls: list[str] = []
     for ep in endpoints:
         url = str(ep["url"])
         existing_row: Endpoint | None = existing.get(url)
@@ -349,12 +363,12 @@ async def upsert_endpoints(
                     last_seen_at=now,
                 )
             )
-            new_count += 1
+            new_urls.append(url)
         else:
             existing_row.last_seen_at = now
 
     await session.commit()
-    return (new_count, len(existing))
+    return (len(new_urls), len(existing), new_urls)
 
 
 async def list_endpoints(
@@ -365,18 +379,15 @@ async def list_endpoints(
     host: str | None = None,
     limit: int | None = None,
 ) -> list[EndpointRow]:
-    stmt = (
-        select(
-            Endpoint.url,
-            Endpoint.host,
-            Endpoint.source,
-            Endpoint.status_code,
-            Endpoint.content_type,
-            Endpoint.first_seen_at,
-            Endpoint.last_seen_at,
-        )
-        .order_by(Endpoint.first_seen_at.desc())
-    )
+    stmt = select(
+        Endpoint.url,
+        Endpoint.host,
+        Endpoint.source,
+        Endpoint.status_code,
+        Endpoint.content_type,
+        Endpoint.first_seen_at,
+        Endpoint.last_seen_at,
+    ).order_by(Endpoint.first_seen_at.desc())
     if target_id is not None:
         stmt = stmt.where(Endpoint.target_id == target_id)
     if since is not None:
@@ -390,8 +401,13 @@ async def list_endpoints(
     result = await session.execute(stmt)
     return [
         EndpointRow(
-            url=r[0], host=r[1], source=r[2], status_code=r[3],
-            content_type=r[4], first_seen_at=r[5], last_seen_at=r[6],
+            url=r[0],
+            host=r[1],
+            source=r[2],
+            status_code=r[3],
+            content_type=r[4],
+            first_seen_at=r[5],
+            last_seen_at=r[6],
         )
         for r in result.all()
     ]

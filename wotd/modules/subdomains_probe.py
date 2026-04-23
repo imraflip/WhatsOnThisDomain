@@ -6,7 +6,7 @@ from typing import Any
 
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import parse_jsonl
-from wotd.store import get_resolved_hosts, upsert_http_services
+from wotd.store import get_unprobed_hosts, upsert_http_services
 from wotd.tools import ToolNotFoundError, run_tool
 
 
@@ -47,7 +47,7 @@ class SubdomainsProbeModule(Module):
     name = "subdomains_probe"
 
     async def run(self) -> ModuleResult:
-        hosts = await get_resolved_hosts(self.session, self.target.id)
+        hosts = await get_unprobed_hosts(self.session, self.target.id)
         if not hosts:
             return ModuleResult(
                 module=self.name,

@@ -156,9 +156,7 @@ async def _build_notify_payload(
     for host in sorted(new_subs_set):
         if host in probed_by_host:
             code, url = probed_by_host[host]
-            new_hosts.append(
-                NewHost(host=host, status="probed", status_code=code, url=url)
-            )
+            new_hosts.append(NewHost(host=host, status="probed", status_code=code, url=url))
             live_count += 1
             resolved_count += 1
         elif host in resolved_hosts:
@@ -292,9 +290,7 @@ def show_subdomains(
     all_rows: bool = typer.Option(
         False, "--all", help="Ignore --since and --limit, show everything."
     ),
-    as_json: bool = typer.Option(
-        False, "--json", help="Output raw JSON instead of a table."
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
 ) -> None:
     """List subdomains stored in the database.
 
@@ -357,13 +353,24 @@ async def _show_endpoints(
 
     if as_json:
         import json as json_lib
-        print(json_lib.dumps([
-            {"url": r.url, "host": r.host, "source": r.source,
-             "status_code": r.status_code, "content_type": r.content_type,
-             "first_seen_at": r.first_seen_at.isoformat(),
-             "last_seen_at": r.last_seen_at.isoformat()}
-            for r in rows
-        ], indent=2))
+
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "source": r.source,
+                        "status_code": r.status_code,
+                        "content_type": r.content_type,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
         return
 
     if not rows:

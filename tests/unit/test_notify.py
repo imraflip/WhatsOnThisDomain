@@ -310,9 +310,10 @@ class TestChunkMessage:
         assert len(chunks) > 1
         for chunk in chunks:
             assert len(chunk) <= 30
-        assert "\n".join(chunks).replace("\n\n", "\n") == msg or sum(
-            c.count("\n") + 1 for c in chunks
-        ) == 20
+        assert (
+            "\n".join(chunks).replace("\n\n", "\n") == msg
+            or sum(c.count("\n") + 1 for c in chunks) == 20
+        )
 
     def test_preserves_every_line(self) -> None:
         lines = [f"host{i}.example.com (found)" for i in range(100)]

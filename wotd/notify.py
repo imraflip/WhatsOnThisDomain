@@ -113,9 +113,7 @@ def _split_resolved_and_live(
         (h for h in payload.new_hosts if h.status in ("resolved", "probed")),
         key=lambda h: h.host,
     )
-    live = sorted(
-        (h for h in payload.new_hosts if h.status == "probed"), key=lambda h: h.host
-    )
+    live = sorted((h for h in payload.new_hosts if h.status == "probed"), key=lambda h: h.host)
     return resolved, live
 
 
