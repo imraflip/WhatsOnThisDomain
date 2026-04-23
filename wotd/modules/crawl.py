@@ -36,7 +36,32 @@ async def _run_waymore(domain: str) -> ToolResult:
     return await run_tool(
         "waymore",
         ["-i", domain, "-mode", "U", "-nlf"],
-        timeout=600.0,
+        timeout=None,
+    )
+
+
+async def _run_katana(url: str) -> ToolResult:
+    return await run_tool(
+        "katana",
+        ["-u", url, "-d", "5", "-jc", "-kf", "all", "-fs", "rdn", "-silent"],
+        timeout=None,
+    )
+
+
+async def _run_gospider(url: str) -> ToolResult:
+    return await run_tool(
+        "gospider",
+        ["-s", url, "-d", "3", "-c", "10", "--js", "--sitemap", "--robots", "-q"],
+        timeout=None,
+    )
+
+
+async def _run_hakrawler(url: str) -> ToolResult:
+    return await run_tool(
+        "hakrawler",
+        ["-d", "3", "-subs"],
+        stdin_data=url + "\n",
+        timeout=None,
     )
 
 
@@ -55,6 +80,9 @@ class CrawlModule(Module):
             "waybackurls": _run_waybackurls(domain),
             "gau": _run_gau(domain),
             "waymore": _run_waymore(domain),
+            "katana": _run_katana(self.url),
+            "gospider": _run_gospider(self.url),
+            "hakrawler": _run_hakrawler(self.url),
         }
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
@@ -103,7 +131,10 @@ class CrawlModule(Module):
     ) -> dict[str, set[str]]:
         result = {}
         for url, sources in url_to_sources.items():
-            host = urlparse(url).hostname or ""
+            try:
+                host = urlparse(url).hostname or ""
+            except ValueError:
+                continue
             if host and self.scope.is_in_scope(host):
                 result[url] = sources
         return result

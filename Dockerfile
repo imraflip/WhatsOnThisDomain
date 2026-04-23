@@ -36,6 +36,11 @@ RUN go install github.com/tomnomnom/waybackurls@latest \
 
 RUN pip install --no-cache-dir waymore
 
+# Active crawl tools
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest \
+    && go install github.com/jaeles-project/gospider@latest \
+    && go install github.com/hakluke/hakrawler@latest
+
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \
     && cd /tmp/massdns && make \
