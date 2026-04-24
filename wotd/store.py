@@ -321,6 +321,14 @@ async def get_unprobed_hosts(session: AsyncSession, target_id: int) -> list[str]
     return [h for h in all_resolved if h not in probed_set]
 
 
+async def get_http_service_urls(session: AsyncSession, target_id: int) -> list[str]:
+    """Return all live HTTP service URLs for a target."""
+    result = await session.execute(
+        select(HttpService.url).where(HttpService.target_id == target_id).distinct()
+    )
+    return [row[0] for row in result.all()]
+
+
 async def upsert_http_services(
     session: AsyncSession,
     target_id: int,

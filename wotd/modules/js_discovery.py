@@ -14,6 +14,7 @@ from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import parse_lines
 from wotd.scope import Scope
 from wotd.store import (
+    get_http_service_urls,
     get_js_file_urls,
     get_js_urls_from_endpoints,
     upsert_js_endpoints,
@@ -23,6 +24,7 @@ from wotd.store import (
 from wotd.tools import ToolNotFoundError, run_gf, run_tool
 
 _JSLUICE_CONCURRENCY = 10
+_WORDLIST_JS = "/opt/wotd/wordlists/httparchive_js.txt"
 
 _GF_JS_PATTERNS: tuple[str, ...] = (
     "aws-keys",
@@ -103,6 +105,35 @@ async def _jsluice_secrets(content: str) -> list[dict[str, Any]]:
     return out
 
 
+async def _ffuf_js_pass(base_url: str) -> list[str]:
+    """Discover JS files on base_url via ffuf bruteforce."""
+    result = await run_tool(
+        "ffuf",
+        [
+            "-u", f"{base_url}/FUZZ",
+            "-w", _WORDLIST_JS,
+            "-rate", "150",
+            "-t", "50",
+            "-mc", "200,204",
+            "-json",
+        ],
+        timeout=None,
+    )
+    urls = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        url = obj.get("url", "")
+        if url:
+            urls.append(url)
+    return urls
+
+
 async def _gf_js_content(js_url: str, content: str) -> list[dict[str, Any]]:
     """Run gf secret patterns against already-fetched JS content."""
     if not content.strip():
@@ -142,9 +173,11 @@ class JsDiscoveryModule(Module):
         target: Target,
         scope: Scope,
         seed_urls: list[str] | None = None,
+        bruteforce_js: bool = False,
     ) -> None:
         super().__init__(session, target, scope)
         self.seed_urls = seed_urls or []
+        self.bruteforce_js = bruteforce_js
 
     async def run(self) -> ModuleResult:
         url_to_sources: dict[str, set[str]] = {}
@@ -165,6 +198,17 @@ class JsDiscoveryModule(Module):
                     url_to_sources.setdefault(url, set()).add("getjs")
             except ToolNotFoundError:
                 errors["getjs"] = "not installed"
+
+        if self.bruteforce_js:
+            svc_urls = await get_http_service_urls(self.session, self.target.id)
+            base_urls: set[str] = set()
+            for svc_url in svc_urls:
+                parsed = urlparse(svc_url)
+                if parsed.scheme and parsed.hostname:
+                    base_urls.add(f"{parsed.scheme}://{parsed.hostname}")
+            for base_url in sorted(base_urls):
+                for url in await _ffuf_js_pass(base_url):
+                    url_to_sources.setdefault(url, set()).add("ffuf")
 
         in_scope: dict[str, set[str]] = {}
         for url, sources in url_to_sources.items():

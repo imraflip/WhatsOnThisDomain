@@ -680,7 +680,7 @@ def crawl(
     asyncio.run(_run_crawl(url, notify))
 
 
-async def _run_discover_js(url: str, notify: bool = False) -> None:
+async def _run_discover_js(url: str, notify: bool = False, bruteforce_js: bool = False) -> None:
     from urllib.parse import urlparse
 
     from wotd.modules.js_discovery import JsDiscoveryModule
@@ -706,7 +706,9 @@ async def _run_discover_js(url: str, notify: bool = False) -> None:
         is_first = not await has_prior_scan(session, target.id, JsDiscoveryModule.name)
 
         scan_run = await start_scan_run(session, target.id, JsDiscoveryModule.name)
-        module = JsDiscoveryModule(session, target, scope, seed_urls=[url])
+        module = JsDiscoveryModule(
+            session, target, scope, seed_urls=[url], bruteforce_js=bruteforce_js
+        )
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
@@ -834,19 +836,23 @@ def discover_js(
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
+    bruteforce_js: bool = typer.Option(
+        False, "--bruteforce-js",
+        help="Run ffuf against live HTTP services to find unlinked JS files.",
+    ),
 ) -> None:
     """Discover JavaScript files for a target URL.
 
     Collects .js URLs from the endpoints table and by running subjs and getjs
-    against the provided URL. Scope-filters results and stores discovered
-    URLs in the js_files table. No content is downloaded.
+    against the provided URL. With --bruteforce-js, also runs ffuf against
+    every live HTTP service using httparchive_js.txt to surface unlinked files.
     """
     if "://" not in target:
         console.print(
             "[red]error:[/red] discover-js requires a full URL with scheme (e.g. https://acme.com)"
         )
         raise typer.Exit(code=2)
-    asyncio.run(_run_discover_js(target, notify))
+    asyncio.run(_run_discover_js(target, notify, bruteforce_js))
 
 
 def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
@@ -1208,8 +1214,9 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --json      raw json output
 
 [bold]JS file discovery[/bold]
-  wotd discover-js acme.com              collect JS files from endpoints + subjs
-  wotd discover-js acme.com --notify    also dispatch notification on new JS files
+  wotd discover-js acme.com                    collect JS files from endpoints + subjs
+  wotd discover-js acme.com --bruteforce-js    also ffuf every live host for unlinked JS
+  wotd discover-js acme.com --notify           also dispatch notification on new JS files
   wotd show js-files acme.com           inspect downloaded JS files
 
 [bold]Notifications[/bold]
