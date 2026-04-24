@@ -13,6 +13,7 @@ from wotd.models import (
     DnsRecord,
     Endpoint,
     HttpService,
+    InterestingEndpoint,
     JsEndpoint,
     JsFile,
     JsSecret,
@@ -49,6 +50,15 @@ class JsEndpointRow:
     method: str | None
     params: str | None
     source_js_url: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class InterestingEndpointRow:
+    url: str
+    host: str
+    pattern: str
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -744,6 +754,93 @@ async def list_js_secrets(
             source_js_url=r[4],
             first_seen_at=r[5],
             last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
+
+
+async def upsert_interesting_endpoints(
+    session: AsyncSession,
+    target_id: int,
+    findings: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Insert new interesting endpoint pattern matches, refresh last_seen on existing ones.
+
+    Each dict must contain 'url', 'host', 'pattern'.
+    Returns (new_count, existing_count).
+    """
+    if not findings:
+        return (0, 0)
+
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for f in findings:
+        key = (str(f["url"]), str(f["pattern"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    result = await session.execute(
+        select(InterestingEndpoint).where(InterestingEndpoint.target_id == target_id)
+    )
+    existing = {(r.url, r.pattern): r for r in result.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for f in unique:
+        key = (str(f["url"]), str(f["pattern"]))
+        row: InterestingEndpoint | None = existing.get(key)
+        if row is None:
+            session.add(
+                InterestingEndpoint(
+                    target_id=target_id,
+                    url=key[0],
+                    host=str(f.get("host", "")),
+                    pattern=key[1],
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
+
+
+async def list_interesting_endpoints(
+    session: AsyncSession,
+    target_id: int | None = None,
+    pattern: str | None = None,
+    host: str | None = None,
+    limit: int | None = None,
+) -> list[InterestingEndpointRow]:
+    stmt = select(
+        InterestingEndpoint.url,
+        InterestingEndpoint.host,
+        InterestingEndpoint.pattern,
+        InterestingEndpoint.first_seen_at,
+        InterestingEndpoint.last_seen_at,
+    ).order_by(InterestingEndpoint.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(InterestingEndpoint.target_id == target_id)
+    if pattern is not None:
+        stmt = stmt.where(InterestingEndpoint.pattern == pattern)
+    if host is not None:
+        stmt = stmt.where(InterestingEndpoint.host == host)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        InterestingEndpointRow(
+            url=r[0],
+            host=r[1],
+            pattern=r[2],
+            first_seen_at=r[3],
+            last_seen_at=r[4],
         )
         for r in result.all()
     ]

@@ -12,8 +12,13 @@ from wotd.models import Target
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import normalize_urls, parse_lines
 from wotd.scope import Scope
-from wotd.store import upsert_endpoints
-from wotd.tools import ToolNotFoundError, ToolResult, run_tool
+from wotd.store import upsert_endpoints, upsert_interesting_endpoints
+from wotd.tools import ToolNotFoundError, ToolResult, run_gf, run_tool
+
+_GF_ENDPOINT_PATTERNS: tuple[str, ...] = (
+    "xss", "sqli", "ssrf", "redirect", "rce", "lfi", "idor",
+    "ssti", "interestingparams", "upload-fields", "debug_logic",
+)
 
 _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".css", ".scss", ".less",
@@ -127,11 +132,34 @@ class CrawlModule(Module):
             self.session, self.target.id, endpoints
         )
 
+        int_new = 0
+        int_existing = 0
+        try:
+            gf_results = await asyncio.gather(
+                *[run_gf(p, list(in_scope.keys())) for p in _GF_ENDPOINT_PATTERNS],
+                return_exceptions=True,
+            )
+            interesting = []
+            for pattern, res in zip(_GF_ENDPOINT_PATTERNS, gf_results, strict=True):
+                if isinstance(res, BaseException):
+                    continue
+                for url in res:
+                    interesting.append(
+                        {"url": url, "host": urlparse(url).hostname or "", "pattern": pattern}
+                    )
+            int_new, int_existing = await upsert_interesting_endpoints(
+                self.session, self.target.id, interesting
+            )
+        except ToolNotFoundError:
+            pass
+
         stats: dict[str, object] = {
             "total": len(url_to_sources),
             "in_scope": len(in_scope),
             "new_endpoints": new_count,
             "existing_endpoints": existing_count,
+            "interesting_new": int_new,
+            "interesting_existing": int_existing,
             "new_urls": new_urls,
             **{t: per_tool.get(t, 0) for t in tasks},
         }

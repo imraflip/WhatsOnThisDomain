@@ -28,6 +28,7 @@ from wotd.notify import (
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     EndpointRow,
+    InterestingEndpointRow,
     JsEndpointRow,
     JsFileRow,
     JsSecretRow,
@@ -38,6 +39,7 @@ from wotd.store import (
     get_target_by_name,
     has_prior_scan,
     list_endpoints,
+    list_interesting_endpoints,
     list_js_endpoints,
     list_js_files,
     list_js_secrets,
@@ -427,6 +429,80 @@ def show_endpoints(
     asyncio.run(_show_endpoints(target, since_td, source, host, effective_limit, as_json))
 
 
+def _render_interesting_endpoints_table(rows: list[InterestingEndpointRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("pattern", style="bold yellow")
+    table.add_column("host", overflow="fold", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(r.url, r.pattern, r.host, r.first_seen_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_interesting_endpoints(
+    target_name: str | None,
+    pattern: str | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_interesting_endpoints(
+            session, target_id, pattern=pattern, host=host, limit=limit
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "pattern": r.pattern,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no interesting endpoints found[/yellow]")
+        return
+
+    console.print(_render_interesting_endpoints_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("interesting-endpoints")
+def show_interesting_endpoints(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    pattern: str | None = typer.Option(None, "--pattern", help="Filter by gf pattern (e.g. xss)."),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List endpoints flagged by gf pattern matching."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_interesting_endpoints(target, pattern, host, effective_limit, as_json))
+
+
 async def _run_crawl(url: str, notify: bool = False) -> None:
     from urllib.parse import urlparse
 
@@ -461,11 +537,19 @@ async def _run_crawl(url: str, notify: bool = False) -> None:
             raise
 
     new_count = result.stats.get("new_endpoints", 0)
+    int_new = result.stats.get("interesting_new", 0)
     new_urls: list[str] = result.stats.get("new_urls", [])
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
-    elif notify and new_count:
-        message = f"[wotd] {root} — {new_count} new endpoints\n\n" + "\n".join(new_urls)
+    elif notify and (new_count or int_new):
+        parts = []
+        if new_count:
+            parts.append(f"{new_count} new endpoints")
+        if int_new:
+            parts.append(f"{int_new} interesting matches")
+        message = f"[wotd] {root} — " + ", ".join(parts)
+        if new_urls:
+            message += "\n\n" + "\n".join(new_urls[:8])
         sent = await dispatch(message)
         if sent:
             console.print("[dim]notification sent[/dim]")

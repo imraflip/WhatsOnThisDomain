@@ -170,6 +170,27 @@ class JsSecret(Base):
     )
 
 
+class InterestingEndpoint(Base):
+    __tablename__ = "interesting_endpoints"
+    __table_args__ = (
+        UniqueConstraint("target_id", "url", "pattern", name="uq_interesting_endpoint"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class DnsRecord(Base):
     __tablename__ = "dns_records"
     __table_args__ = (
