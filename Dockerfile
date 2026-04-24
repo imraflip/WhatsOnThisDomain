@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         build-essential \
         sqlite3 \
+        jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go
@@ -69,7 +70,7 @@ RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
     && cp bin/massdns /usr/local/bin/massdns \
     && rm -rf /tmp/massdns
 
-# Fetch wordlists and resolvers for active subdomain enumeration.
+# Fetch DNS wordlists, resolvers, and raft fallback for dirbust.
 # Medium is the default (faster than huge, good coverage). Tiny is used by tests.
 RUN mkdir -p /opt/wotd/wordlists \
     && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_medium.txt \
@@ -80,6 +81,34 @@ RUN mkdir -p /opt/wotd/wordlists \
         -o /opt/wotd/resolvers.txt \
     && curl -fsSL https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-directories.txt \
         -o /opt/wotd/wordlists/raft-large-directories.txt
+
+# Fetch Assetnote wordlists into /opt/wotd/wordlists/ under stable normalized names.
+# Automated lists have dated filenames — we query the JSON index once with jq to resolve
+# the current filename, then download and store under a fixed name so module code is stable.
+# Manual lists have stable filenames and are fetched directly.
+# set -e ensures any failed download aborts the build loudly.
+RUN set -e; \
+    CDN="https://wordlists-cdn.assetnote.io/data"; \
+    curl -fsSL "${CDN}/automated.json" -o /tmp/assetnote_automated.json; \
+    for entry in \
+        "httparchive_subdomains_:httparchive_subdomains.txt" \
+        "httparchive_directories_1m_:httparchive_directories.txt" \
+        "httparchive_js_2:httparchive_js.txt" \
+        "httparchive_php_:httparchive_php.txt" \
+        "httparchive_aspx_asp_cfm_svc_ashx_asmx_:httparchive_aspx.txt" \
+        "httparchive_jsp_jspa_do_action_:httparchive_jsp.txt" \
+    ; do \
+        prefix="${entry%%:*}"; \
+        dest="${entry##*:}"; \
+        fname=$(jq -r --arg p "$prefix" \
+            '.data[] | select(.Filename | startswith($p)) | .Filename' \
+            /tmp/assetnote_automated.json | head -1); \
+        echo "Downloading ${fname} -> ${dest}"; \
+        curl -fsSL "${CDN}/automated/${fname}" -o "/opt/wotd/wordlists/${dest}"; \
+    done; \
+    curl -fsSL "${CDN}/manual/bak.txt" -o /opt/wotd/wordlists/bak.txt; \
+    curl -fsSL "${CDN}/manual/dot_filenames.txt" -o /opt/wotd/wordlists/dot_filenames.txt; \
+    rm /tmp/assetnote_automated.json
 
 WORKDIR /app
 
