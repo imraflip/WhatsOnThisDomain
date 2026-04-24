@@ -522,14 +522,6 @@ async def get_js_urls_from_endpoints(session: AsyncSession, target_id: int) -> l
     return [row[0] for row in result.all()]
 
 
-async def get_http_service_urls(session: AsyncSession, target_id: int) -> list[str]:
-    """Return live HTTP service URLs for this target (for subjs input)."""
-    result = await session.execute(
-        select(HttpService.url).where(HttpService.target_id == target_id)
-    )
-    return [row[0] for row in result.all()]
-
-
 async def upsert_js_files(
     session: AsyncSession,
     target_id: int,

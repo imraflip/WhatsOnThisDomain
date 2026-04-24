@@ -14,7 +14,6 @@ from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import parse_lines
 from wotd.scope import Scope
 from wotd.store import (
-    get_http_service_urls,
     get_js_file_urls,
     get_js_urls_from_endpoints,
     upsert_js_endpoints,
@@ -154,18 +153,15 @@ class JsDiscoveryModule(Module):
         for url in await get_js_urls_from_endpoints(self.session, self.target.id):
             url_to_sources.setdefault(url, set()).add("endpoints")
 
-        db_service_urls = await get_http_service_urls(self.session, self.target.id)
-        all_seed_urls = list(dict.fromkeys(db_service_urls + self.seed_urls))
-
-        if all_seed_urls:
+        if self.seed_urls:
             try:
-                for url in await _run_subjs(all_seed_urls):
+                for url in await _run_subjs(self.seed_urls):
                     url_to_sources.setdefault(url, set()).add("subjs")
             except ToolNotFoundError:
                 errors["subjs"] = "not installed"
 
             try:
-                for url in await _run_getjs(all_seed_urls):
+                for url in await _run_getjs(self.seed_urls):
                     url_to_sources.setdefault(url, set()).add("getjs")
             except ToolNotFoundError:
                 errors["getjs"] = "not installed"
