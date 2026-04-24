@@ -739,6 +739,74 @@ async def _run_discover_js(url: str, notify: bool = False) -> None:
             console.print("[dim]notification sent[/dim]")
 
 
+async def _run_dirbust(url: str, notify: bool = False) -> None:
+    from urllib.parse import urlparse
+
+    from wotd.modules.dirbust import DirBruteModule
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target = await get_target_by_name(session, root)
+        if target is None:
+            target = await create_target(session, name=root, root_domains=[root])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
+
+        scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
+        module = DirBruteModule(session, target, scope, url)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{DirBruteModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    new_urls: list[str] = result.stats.get("new_urls", [])
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = f"[wotd] {root} dirbust — {new_count} new paths"
+        if new_urls:
+            message += "\n\n" + "\n".join(new_urls[:8])
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+@app.command("dirbust")
+def dirbust(
+    url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after bruteforcing finishes."
+    ),
+) -> None:
+    """Bruteforce directories and files on a target URL.
+
+    Runs ffuf with a large wordlist against the target, scope-filters results,
+    and stores new paths in the local database.
+    """
+    if "://" not in url:
+        console.print(
+            "[red]error:[/red] dirbust requires a full URL with scheme (e.g. https://acme.com)"
+        )
+        raise typer.Exit(code=2)
+    asyncio.run(_run_dirbust(url, notify))
+
+
 @app.command("discover-js")
 def discover_js(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
@@ -1009,6 +1077,10 @@ _EXAMPLES = """\
 [bold]Shortcuts[/bold]
   wotd ls subdomains acme.com            alias for wotd show subdomains
   wotd ls endpoints acme.com             alias for wotd show endpoints
+
+[bold]Directory bruteforcing[/bold]
+  wotd dirbust https://acme.com          bruteforce paths with ffuf
+  wotd dirbust https://acme.com --notify also dispatch notification on new paths
 
 [bold]JS file discovery[/bold]
   wotd discover-js acme.com              collect JS files from endpoints + subjs
