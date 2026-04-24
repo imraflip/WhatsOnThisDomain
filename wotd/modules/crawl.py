@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,18 @@ from wotd.parsers import normalize_urls, parse_lines
 from wotd.scope import Scope
 from wotd.store import upsert_endpoints
 from wotd.tools import ToolNotFoundError, ToolResult, run_tool
+
+_SKIP_EXTENSIONS: frozenset[str] = frozenset({
+    ".css", ".scss", ".less",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".bmp", ".tiff",
+    ".mp4", ".mp3", ".wav", ".ogg", ".webm", ".avi", ".mov",
+})
+
+
+def _skip_ext(url: str) -> bool:
+    _, ext = os.path.splitext(urlparse(url).path.lower())
+    return ext in _SKIP_EXTENSIONS
 
 
 async def _run_gau(domain: str) -> ToolResult:
@@ -101,7 +114,7 @@ class CrawlModule(Module):
                     "not installed" if isinstance(result, ToolNotFoundError) else str(result)
                 )
                 continue
-            urls = normalize_urls(parse_lines(result.stdout))
+            urls = [u for u in normalize_urls(parse_lines(result.stdout)) if not _skip_ext(u)]
             per_tool[tool_name] = len(urls)
             self._collect(url_to_sources, urls, tool_name)
 
