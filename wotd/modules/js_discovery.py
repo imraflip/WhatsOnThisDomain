@@ -1,4 +1,4 @@
-"""JS file collection and endpoint extraction via subjs, getjs, and jsluice."""
+"""JS file collection and endpoint extraction via subjs, getjs, jsluice, and gf."""
 
 from __future__ import annotations
 
@@ -21,9 +21,19 @@ from wotd.store import (
     upsert_js_files,
     upsert_js_secrets,
 )
-from wotd.tools import ToolNotFoundError, run_tool
+from wotd.tools import ToolNotFoundError, run_gf, run_tool
 
 _JSLUICE_CONCURRENCY = 10
+
+_GF_JS_PATTERNS: tuple[str, ...] = (
+    "aws-keys",
+    "s3-buckets",
+    "firebase",
+    "base64",
+    "generic-api-key",
+    "json-sec",
+    "php-errors",
+)
 
 
 async def _run_subjs(urls: list[str]) -> list[str]:
@@ -46,43 +56,24 @@ async def _run_getjs(urls: list[str]) -> list[str]:
     return parse_lines(result.stdout)
 
 
-async def _jsluice_secrets(js_url: str) -> list[dict[str, Any]]:
-    """Fetch a JS file with curl and extract secrets with jsluice."""
+async def _fetch_js(js_url: str) -> str:
+    """Fetch a JS file with curl and return its content."""
     curl = await run_tool(
         "curl",
         ["-s", "--max-time", "15", "--", js_url],
         timeout=20.0,
     )
-    if not curl.stdout.strip():
-        return []
-    jsluice = await run_tool(
-        "jsluice",
-        ["secrets"],
-        stdin_data=curl.stdout,
-        timeout=30.0,
-    )
-    out: list[dict[str, Any]] = []
-    for line in parse_lines(jsluice.stdout):
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-    return out
+    return curl.stdout
 
 
-async def _jsluice_urls(js_url: str) -> list[dict[str, Any]]:
-    """Fetch a JS file with curl and extract URLs with jsluice."""
-    curl = await run_tool(
-        "curl",
-        ["-s", "--max-time", "15", "--", js_url],
-        timeout=20.0,
-    )
-    if not curl.stdout.strip():
+async def _jsluice_urls(js_url: str, content: str) -> list[dict[str, Any]]:
+    """Extract URLs from already-fetched JS content via jsluice."""
+    if not content.strip():
         return []
     jsluice = await run_tool(
         "jsluice",
         ["urls", "-R", js_url],
-        stdin_data=curl.stdout,
+        stdin_data=content,
         timeout=30.0,
     )
     out: list[dict[str, Any]] = []
@@ -92,6 +83,55 @@ async def _jsluice_urls(js_url: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     return out
+
+
+async def _jsluice_secrets(content: str) -> list[dict[str, Any]]:
+    """Extract secrets from already-fetched JS content via jsluice."""
+    if not content.strip():
+        return []
+    jsluice = await run_tool(
+        "jsluice",
+        ["secrets"],
+        stdin_data=content,
+        timeout=30.0,
+    )
+    out: list[dict[str, Any]] = []
+    for line in parse_lines(jsluice.stdout):
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+async def _gf_js_content(js_url: str, content: str) -> list[dict[str, Any]]:
+    """Run gf secret patterns against already-fetched JS content."""
+    if not content.strip():
+        return []
+    lines = [line for line in content.splitlines() if line.strip()]
+    if not lines:
+        return []
+    pattern_results = await asyncio.gather(
+        *[run_gf(p, lines) for p in _GF_JS_PATTERNS],
+        return_exceptions=True,
+    )
+    findings: list[dict[str, Any]] = []
+    for pattern, res in zip(_GF_JS_PATTERNS, pattern_results, strict=True):
+        if isinstance(res, BaseException):
+            continue
+        for match in res:
+            match = match.strip()
+            if match:
+                findings.append(
+                    {
+                        "source_js_url": js_url,
+                        "kind": f"gf:{pattern}",
+                        "data": json.dumps(match),
+                        "severity": None,
+                        "context": None,
+                    }
+                )
+    return findings
 
 
 class JsDiscoveryModule(Module):
@@ -149,29 +189,30 @@ class JsDiscoveryModule(Module):
             self.session, self.target.id, files
         )
 
-        # Extract endpoints from all known JS files for this target.
         all_js_urls = await get_js_file_urls(self.session, self.target.id)
         sem = asyncio.Semaphore(_JSLUICE_CONCURRENCY)
 
         async def _process(
             js_url: str,
-        ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
             async with sem:
                 try:
-                    urls_out, secrets_out = await asyncio.gather(
-                        _jsluice_urls(js_url),
-                        _jsluice_secrets(js_url),
+                    content = await _fetch_js(js_url)
+                    urls_out, secrets_out, gf_out = await asyncio.gather(
+                        _jsluice_urls(js_url, content),
+                        _jsluice_secrets(content),
+                        _gf_js_content(js_url, content),
                     )
-                    return js_url, urls_out, secrets_out
+                    return js_url, urls_out, secrets_out, gf_out
                 except Exception:
-                    return js_url, [], []
+                    return js_url, [], [], []
 
         js_results = await asyncio.gather(*[_process(u) for u in all_js_urls])
 
         endpoint_dicts: list[dict[str, Any]] = []
         secret_dicts: list[dict[str, Any]] = []
 
-        for js_url, url_items, secret_items in js_results:
+        for js_url, url_items, secret_items, gf_items in js_results:
             for item in url_items:
                 raw_url = item.get("url", "")
                 if not raw_url:
@@ -206,6 +247,8 @@ class JsDiscoveryModule(Module):
                         "context": json.dumps(item["context"]) if item.get("context") else None,
                     }
                 )
+
+            secret_dicts.extend(gf_items)
 
         new_ep, existing_ep, new_ep_urls = await upsert_js_endpoints(
             self.session, self.target.id, endpoint_dicts
