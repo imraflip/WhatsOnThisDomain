@@ -77,3 +77,11 @@ async def run_tool(
         stdout=stdout_bytes.decode(errors="replace"),
         stderr=stderr_bytes.decode(errors="replace"),
     )
+
+
+async def run_gf(pattern: str, lines: list[str]) -> list[str]:
+    """Run a gf pattern against lines, return matching lines."""
+    if not lines:
+        return []
+    result = await run_tool("gf", [pattern], stdin_data="\n".join(lines), timeout=30.0)
+    return [line for line in result.stdout.splitlines() if line.strip()]

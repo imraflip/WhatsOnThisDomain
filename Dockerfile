@@ -48,6 +48,16 @@ RUN go install github.com/lc/subjs@latest \
     && go install github.com/003random/getjs@latest \
     && go install github.com/BishopFox/jsluice/cmd/jsluice@latest
 
+# gf pattern matching — install binary + community patterns into ~/.gf
+RUN go install github.com/tomnomnom/gf@latest \
+    && mkdir -p /root/.gf \
+    && git clone --depth 1 https://github.com/tomnomnom/gf.git /tmp/gf-src \
+    && cp /tmp/gf-src/examples/*.json /root/.gf/ \
+    && rm -rf /tmp/gf-src \
+    && git clone --depth 1 https://github.com/1ndianl33t/Gf-Patterns.git /tmp/gf-patterns \
+    && cp /tmp/gf-patterns/*.json /root/.gf/ \
+    && rm -rf /tmp/gf-patterns
+
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \
     && cd /tmp/massdns && make \
