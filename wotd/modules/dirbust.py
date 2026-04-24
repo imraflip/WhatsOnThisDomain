@@ -68,7 +68,7 @@ class DirBruteModule(Module):
                 }
             )
 
-        new_count, existing_count, new_urls = await upsert_dir_results(
+        new_count, existing_count, new_urls, changed_urls = await upsert_dir_results(
             self.session, self.target.id, findings
         )
 
@@ -78,6 +78,8 @@ class DirBruteModule(Module):
                 "total_hits": len(findings),
                 "new": new_count,
                 "existing": existing_count,
+                "changed": len(changed_urls),
                 "new_urls": new_urls,
+                "changed_urls": changed_urls,
             },
         )

@@ -27,6 +27,7 @@ from wotd.notify import (
 )
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
+    DirResultRow,
     EndpointRow,
     InterestingEndpointRow,
     InterestingSubdomainRow,
@@ -40,6 +41,7 @@ from wotd.store import (
     get_subdomain_hosts,
     get_target_by_name,
     has_prior_scan,
+    list_dir_results,
     list_endpoints,
     list_interesting_endpoints,
     list_interesting_subdomains,
@@ -775,13 +777,21 @@ async def _run_dirbust(url: str, notify: bool = False) -> None:
             raise
 
     new_count = result.stats.get("new", 0)
+    changed_count = result.stats.get("changed", 0)
     new_urls: list[str] = result.stats.get("new_urls", [])
+    changed_urls: list[str] = result.stats.get("changed_urls", [])
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
-    elif notify and new_count:
-        message = f"[wotd] {root} dirbust — {new_count} new paths"
-        if new_urls:
-            message += "\n\n" + "\n".join(new_urls[:8])
+    elif notify and (new_count or changed_count):
+        parts = []
+        if new_count:
+            parts.append(f"{new_count} new paths")
+        if changed_count:
+            parts.append(f"{changed_count} status changes")
+        message = f"[wotd] {root} dirbust — " + ", ".join(parts)
+        sample = (new_urls + changed_urls)[:8]
+        if sample:
+            message += "\n\n" + "\n".join(sample)
         sent = await dispatch(message)
         if sent:
             console.print("[dim]notification sent[/dim]")
@@ -826,6 +836,103 @@ def discover_js(
         )
         raise typer.Exit(code=2)
     asyncio.run(_run_discover_js(target, notify))
+
+
+def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("status", justify="right")
+    table.add_column("base url", overflow="fold", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(
+            r.url,
+            str(r.status_code),
+            r.base_url,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_dir_results(
+    target_name: str | None,
+    since: timedelta | None,
+    status_code: int | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_dir_results(
+            session, target_id, since=since, status_code=status_code, host=host, limit=limit
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "base_url": r.base_url,
+                        "status_code": r.status_code,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no dir results found[/yellow]")
+        return
+
+    console.print(_render_dir_results_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("dir-results")
+def show_dir_results(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    status: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(
+        False, "--all", help="Ignore --since and --limit, show everything."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List directory bruteforce results stored in the database."""
+    if all_rows:
+        since_td: timedelta | None = None
+        effective_limit: int | None = None
+    else:
+        since_td = None
+        if since:
+            try:
+                since_td = parse_duration(since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+        effective_limit = None if limit == 0 else limit
+
+    asyncio.run(_show_dir_results(target, since_td, status, host, effective_limit, as_json))
 
 
 def _render_js_files_table(rows: list[JsFileRow]) -> Table:
@@ -1079,8 +1186,14 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dirbust https://acme.com          bruteforce paths with ffuf
-  wotd dirbust https://acme.com --notify also dispatch notification on new paths
+  wotd dirbust https://acme.com              bruteforce paths with ffuf
+  wotd dirbust https://acme.com --notify     also dispatch notification on new/changed paths
+  wotd show dir-results acme.com             latest 25 results
+  wotd show dir-results acme.com --all       every result, no limit
+  wotd show dir-results acme.com --status 200  filter by status code
+  wotd show dir-results acme.com --host sub.acme.com  filter by host
+  wotd show dir-results acme.com --since 24h  found in the last day
+  wotd show dir-results acme.com --json      raw json output
 
 [bold]JS file discovery[/bold]
   wotd discover-js acme.com              collect JS files from endpoints + subjs
