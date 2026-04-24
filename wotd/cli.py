@@ -741,7 +741,7 @@ async def _run_discover_js(url: str, notify: bool = False) -> None:
             console.print("[dim]notification sent[/dim]")
 
 
-async def _run_dirbust(url: str, notify: bool = False) -> None:
+async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) -> None:
     from urllib.parse import urlparse
 
     from wotd.modules.dirbust import DirBruteModule
@@ -767,7 +767,7 @@ async def _run_dirbust(url: str, notify: bool = False) -> None:
         is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
 
         scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
-        module = DirBruteModule(session, target, scope, url)
+        module = DirBruteModule(session, target, scope, url, tech=tech)
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
@@ -797,24 +797,35 @@ async def _run_dirbust(url: str, notify: bool = False) -> None:
             console.print("[dim]notification sent[/dim]")
 
 
+_TECH_WORDLISTS = {"php", "java", "dotnet"}
+
+
 @app.command("dirbust")
 def dirbust(
     url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after bruteforcing finishes."
     ),
+    tech: str | None = typer.Option(
+        None, "--tech", help="Run an extra tech-specific pass (php, java, dotnet).",
+    ),
 ) -> None:
     """Bruteforce directories and files on a target URL.
 
-    Runs ffuf with a large wordlist against the target, scope-filters results,
-    and stores new paths in the local database.
+    Always runs two passes: primary (httparchive directories) and sensitive
+    files (backup files, dotfiles). Add --tech for a third tech-specific pass.
     """
     if "://" not in url:
         console.print(
             "[red]error:[/red] dirbust requires a full URL with scheme (e.g. https://acme.com)"
         )
         raise typer.Exit(code=2)
-    asyncio.run(_run_dirbust(url, notify))
+    if tech is not None and tech not in _TECH_WORDLISTS:
+        console.print(
+            f"[red]error:[/red] --tech must be one of: {', '.join(sorted(_TECH_WORDLISTS))}"
+        )
+        raise typer.Exit(code=2)
+    asyncio.run(_run_dirbust(url, notify, tech))
 
 
 @app.command("discover-js")
@@ -1186,7 +1197,8 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dirbust https://acme.com              bruteforce paths with ffuf
+  wotd dirbust https://acme.com              primary + sensitive files passes
+  wotd dirbust https://acme.com --tech php   add a third PHP-specific pass
   wotd dirbust https://acme.com --notify     also dispatch notification on new/changed paths
   wotd show dir-results acme.com             latest 25 results
   wotd show dir-results acme.com --all       every result, no limit

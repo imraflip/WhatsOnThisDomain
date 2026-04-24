@@ -108,6 +108,8 @@ RUN set -e; \
     done; \
     curl -fsSL "${CDN}/manual/bak.txt" -o /opt/wotd/wordlists/bak.txt; \
     curl -fsSL "${CDN}/manual/dot_filenames.txt" -o /opt/wotd/wordlists/dot_filenames.txt; \
+    cat /opt/wotd/wordlists/bak.txt /opt/wotd/wordlists/dot_filenames.txt \
+        > /opt/wotd/wordlists/sensitive_files.txt; \
     rm /tmp/assetnote_automated.json
 
 WORKDIR /app

@@ -13,7 +13,13 @@ from wotd.scope import Scope
 from wotd.store import upsert_dir_results
 from wotd.tools import run_tool
 
-_WORDLIST = "/opt/wotd/wordlists/raft-large-directories.txt"
+_WORDLIST_PRIMARY = "/opt/wotd/wordlists/httparchive_directories.txt"
+_WORDLIST_SENSITIVE = "/opt/wotd/wordlists/sensitive_files.txt"
+_WORDLIST_TECH: dict[str, str] = {
+    "php": "/opt/wotd/wordlists/httparchive_php.txt",
+    "java": "/opt/wotd/wordlists/httparchive_jsp.txt",
+    "dotnet": "/opt/wotd/wordlists/httparchive_aspx.txt",
+}
 
 
 class DirBruteModule(Module):
@@ -25,17 +31,19 @@ class DirBruteModule(Module):
         target: Target,
         scope: Scope,
         base_url: str,
+        tech: str | None = None,
     ) -> None:
         super().__init__(session, target, scope)
         self.base_url = base_url.rstrip("/")
+        self.tech = tech
 
-    async def run(self) -> ModuleResult:
+    async def _ffuf_pass(self, wordlist: str) -> list[dict[str, object]]:
         fuzz_url = f"{self.base_url}/FUZZ"
         result = await run_tool(
             "ffuf",
             [
                 "-u", fuzz_url,
-                "-w", _WORDLIST,
+                "-w", wordlist,
                 "-rate", "150",
                 "-t", "50",
                 "-mc", "200,201,204,301,302,307,401,403,405",
@@ -43,7 +51,6 @@ class DirBruteModule(Module):
             ],
             timeout=None,
         )
-
         findings = []
         for line in result.stdout.splitlines():
             line = line.strip()
@@ -67,15 +74,25 @@ class DirBruteModule(Module):
                     "status_code": int(status),
                 }
             )
+        return findings
+
+    async def run(self) -> ModuleResult:
+        wordlists = [_WORDLIST_PRIMARY, _WORDLIST_SENSITIVE]
+        if self.tech:
+            wordlists.append(_WORDLIST_TECH[self.tech])
+
+        all_findings: list[dict[str, object]] = []
+        for wl in wordlists:
+            all_findings.extend(await self._ffuf_pass(wl))
 
         new_count, existing_count, new_urls, changed_urls = await upsert_dir_results(
-            self.session, self.target.id, findings
+            self.session, self.target.id, all_findings
         )
 
         return ModuleResult(
             module=self.name,
             stats={
-                "total_hits": len(findings),
+                "total_hits": len(all_findings),
                 "new": new_count,
                 "existing": existing_count,
                 "changed": len(changed_urls),
