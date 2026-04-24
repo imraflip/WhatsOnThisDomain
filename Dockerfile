@@ -48,6 +48,9 @@ RUN go install github.com/lc/subjs@latest \
     && go install github.com/003random/getjs@latest \
     && go install github.com/BishopFox/jsluice/cmd/jsluice@latest
 
+# Directory bruteforcing
+RUN go install github.com/ffuf/ffuf/v2@latest
+
 # gf pattern matching — install binary + community patterns + custom wotd patterns into ~/.gf
 RUN go install github.com/tomnomnom/gf@latest \
     && mkdir -p /root/.gf \
@@ -74,7 +77,9 @@ RUN mkdir -p /opt/wotd/wordlists \
     && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_tiny.txt \
         -o /opt/wotd/wordlists/dns_tiny.txt \
     && curl -fsSL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
-        -o /opt/wotd/resolvers.txt
+        -o /opt/wotd/resolvers.txt \
+    && curl -fsSL https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-directories.txt \
+        -o /opt/wotd/wordlists/raft-large-directories.txt
 
 WORKDIR /app
 

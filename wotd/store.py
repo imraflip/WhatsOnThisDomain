@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from wotd.models import (
+    DirResult,
     DnsRecord,
     Endpoint,
     HttpService,
@@ -950,6 +951,105 @@ async def list_js_files(
             url=r[0],
             host=r[1],
             sources=r[2],
+            first_seen_at=r[3],
+            last_seen_at=r[4],
+        )
+        for r in result.all()
+    ]
+
+
+@dataclass
+class DirResultRow:
+    url: str
+    base_url: str
+    status_code: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+async def upsert_dir_results(
+    session: AsyncSession,
+    target_id: int,
+    findings: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Upsert dir bruteforce results. Returns (new, existing, new_urls)."""
+    if not findings:
+        return 0, 0, []
+
+    existing_rows = await session.execute(
+        select(DirResult.url, DirResult.status_code).where(DirResult.target_id == target_id)
+    )
+    existing: dict[str, int] = {row[0]: row[1] for row in existing_rows.all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    new_urls: list[str] = []
+
+    for f in findings:
+        url = f["url"]
+        if url not in existing:
+            session.add(
+                DirResult(
+                    target_id=target_id,
+                    url=url,
+                    base_url=f["base_url"],
+                    status_code=f["status_code"],
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+            new_urls.append(url)
+        else:
+            row = (
+                await session.execute(
+                    select(DirResult).where(
+                        DirResult.target_id == target_id, DirResult.url == url
+                    )
+                )
+            ).scalar_one()
+            row.status_code = f["status_code"]
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return new_count, existing_count, new_urls
+
+
+async def list_dir_results(
+    session: AsyncSession,
+    target_id: int | None,
+    since: timedelta | None = None,
+    status_code: int | None = None,
+    base_url: str | None = None,
+    limit: int | None = 25,
+) -> list[DirResultRow]:
+    stmt = select(
+        DirResult.url,
+        DirResult.base_url,
+        DirResult.status_code,
+        DirResult.first_seen_at,
+        DirResult.last_seen_at,
+    ).order_by(DirResult.first_seen_at.desc())
+
+    if target_id is not None:
+        stmt = stmt.where(DirResult.target_id == target_id)
+    if since is not None:
+        stmt = stmt.where(DirResult.first_seen_at >= datetime.now(UTC) - since)
+    if status_code is not None:
+        stmt = stmt.where(DirResult.status_code == status_code)
+    if base_url is not None:
+        stmt = stmt.where(DirResult.base_url == base_url)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    return [
+        DirResultRow(
+            url=r[0],
+            base_url=r[1],
+            status_code=r[2],
             first_seen_at=r[3],
             last_seen_at=r[4],
         )

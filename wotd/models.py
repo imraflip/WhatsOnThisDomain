@@ -211,6 +211,25 @@ class InterestingEndpoint(Base):
     )
 
 
+class DirResult(Base):
+    __tablename__ = "dir_results"
+    __table_args__ = (UniqueConstraint("target_id", "url", name="uq_dir_result_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class DnsRecord(Base):
     __tablename__ = "dns_records"
     __table_args__ = (
