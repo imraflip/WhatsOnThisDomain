@@ -526,14 +526,27 @@ async def _run_discover_js(url: str, notify: bool = False) -> None:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
 
-    new_count = result.stats.get("new", 0)
-    new_urls: list[str] = result.stats.get("new_urls", [])
+    new_js = result.stats.get("js_files_new", 0)
+    new_ep = result.stats.get("js_endpoints_new", 0)
+    new_sec = result.stats.get("js_secrets_new", 0)
+    new_js_urls: list[str] = result.stats.get("new_js_urls", [])
+    new_ep_urls: list[str] = result.stats.get("new_ep_urls", [])
+
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
-    elif notify and new_count:
-        message = f"[wotd] {root} — {new_count} new JS files\n\n" + "\n".join(
-            new_urls if isinstance(new_urls, list) else []
-        )
+    elif notify and (new_js or new_ep or new_sec):
+        parts = []
+        if new_js:
+            parts.append(f"{new_js} new JS files")
+        if new_ep:
+            parts.append(f"{new_ep} new JS endpoints")
+        if new_sec:
+            parts.append(f"{new_sec} new JS secrets")
+        message = f"[wotd] {root} — " + ", ".join(parts)
+        if new_js_urls:
+            message += "\n\nJS files:\n" + "\n".join(new_js_urls[:8])
+        if new_ep_urls:
+            message += "\n\nEndpoints:\n" + "\n".join(new_ep_urls[:8])
         sent = await dispatch(message)
         if sent:
             console.print("[dim]notification sent[/dim]")
