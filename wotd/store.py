@@ -14,6 +14,7 @@ from wotd.models import (
     Endpoint,
     HttpService,
     InterestingEndpoint,
+    InterestingSubdomain,
     JsEndpoint,
     JsFile,
     JsSecret,
@@ -50,6 +51,14 @@ class JsEndpointRow:
     method: str | None
     params: str | None
     source_js_url: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class InterestingSubdomainRow:
+    fqdn: str
+    pattern: str
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -754,6 +763,87 @@ async def list_js_secrets(
             source_js_url=r[4],
             first_seen_at=r[5],
             last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
+
+
+async def upsert_interesting_subdomains(
+    session: AsyncSession,
+    target_id: int,
+    findings: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Insert new interesting subdomain pattern matches, refresh last_seen on existing ones.
+
+    Each dict must contain 'fqdn' and 'pattern'.
+    Returns (new_count, existing_count).
+    """
+    if not findings:
+        return (0, 0)
+
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for f in findings:
+        key = (str(f["fqdn"]), str(f["pattern"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    result = await session.execute(
+        select(InterestingSubdomain).where(InterestingSubdomain.target_id == target_id)
+    )
+    existing = {(r.fqdn, r.pattern): r for r in result.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for f in unique:
+        key = (str(f["fqdn"]), str(f["pattern"]))
+        row: InterestingSubdomain | None = existing.get(key)
+        if row is None:
+            session.add(
+                InterestingSubdomain(
+                    target_id=target_id,
+                    fqdn=key[0],
+                    pattern=key[1],
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
+
+
+async def list_interesting_subdomains(
+    session: AsyncSession,
+    target_id: int | None = None,
+    pattern: str | None = None,
+    limit: int | None = None,
+) -> list[InterestingSubdomainRow]:
+    stmt = select(
+        InterestingSubdomain.fqdn,
+        InterestingSubdomain.pattern,
+        InterestingSubdomain.first_seen_at,
+        InterestingSubdomain.last_seen_at,
+    ).order_by(InterestingSubdomain.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(InterestingSubdomain.target_id == target_id)
+    if pattern is not None:
+        stmt = stmt.where(InterestingSubdomain.pattern == pattern)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        InterestingSubdomainRow(
+            fqdn=r[0],
+            pattern=r[1],
+            first_seen_at=r[2],
+            last_seen_at=r[3],
         )
         for r in result.all()
     ]

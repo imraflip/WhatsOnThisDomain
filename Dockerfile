@@ -48,7 +48,7 @@ RUN go install github.com/lc/subjs@latest \
     && go install github.com/003random/getjs@latest \
     && go install github.com/BishopFox/jsluice/cmd/jsluice@latest
 
-# gf pattern matching — install binary + community patterns into ~/.gf
+# gf pattern matching — install binary + community patterns + custom wotd patterns into ~/.gf
 RUN go install github.com/tomnomnom/gf@latest \
     && mkdir -p /root/.gf \
     && git clone --depth 1 https://github.com/tomnomnom/gf.git /tmp/gf-src \
@@ -56,7 +56,9 @@ RUN go install github.com/tomnomnom/gf@latest \
     && rm -rf /tmp/gf-src \
     && git clone --depth 1 https://github.com/1ndianl33t/Gf-Patterns.git /tmp/gf-patterns \
     && cp /tmp/gf-patterns/*.json /root/.gf/ \
-    && rm -rf /tmp/gf-patterns
+    && rm -rf /tmp/gf-patterns \
+    && echo '{"flags":"-iE","pattern":"(dev|develop|development|staging|stage|stg|uat|test|testing|qa|sandbox|admin|administrator|portal|dashboard|console|management|api|internal|intranet|corp|corporate|vpn|backup|bak|old|legacy|deprecated|beta|demo|jenkins|ci|cd|jira|confluence|wiki|kibana|grafana|prometheus|monitoring|gitlab|drone|mail|smtp|ftp|sftp|db|database|redis|mongo|elastic|preprod|pre-prod)"}' \
+        > /root/.gf/wotd-subdomains.json
 
 # Build massdns from source (no apt package available)
 RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \

@@ -170,6 +170,26 @@ class JsSecret(Base):
     )
 
 
+class InterestingSubdomain(Base):
+    __tablename__ = "interesting_subdomains"
+    __table_args__ = (
+        UniqueConstraint("target_id", "fqdn", "pattern", name="uq_interesting_subdomain"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    fqdn: Mapped[str] = mapped_column(Text, nullable=False)
+    pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class InterestingEndpoint(Base):
     __tablename__ = "interesting_endpoints"
     __table_args__ = (

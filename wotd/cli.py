@@ -29,6 +29,7 @@ from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
     EndpointRow,
     InterestingEndpointRow,
+    InterestingSubdomainRow,
     JsEndpointRow,
     JsFileRow,
     JsSecretRow,
@@ -36,16 +37,20 @@ from wotd.store import (
     create_target,
     finish_scan_run,
     get_resolved_hosts,
+    get_subdomain_hosts,
     get_target_by_name,
     has_prior_scan,
     list_endpoints,
     list_interesting_endpoints,
+    list_interesting_subdomains,
     list_js_endpoints,
     list_js_files,
     list_js_secrets,
     list_subdomains,
     start_scan_run,
+    upsert_interesting_subdomains,
 )
+from wotd.tools import ToolNotFoundError, run_gf
 from wotd.utils.duration import parse_duration
 
 app = typer.Typer(
@@ -113,6 +118,32 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
 
         payload = await _build_notify_payload(session, target.id, target_name, results)
 
+        int_new = 0
+        int_existing = 0
+        try:
+            all_hosts = await get_subdomain_hosts(session, target.id)
+            _SUB_PATTERNS = ("s3-buckets", "takeovers", "wotd-subdomains")
+            gf_results = await asyncio.gather(
+                *[run_gf(p, all_hosts) for p in _SUB_PATTERNS],
+                return_exceptions=True,
+            )
+            interesting = []
+            for pattern, res in zip(_SUB_PATTERNS, gf_results, strict=True):
+                if isinstance(res, BaseException):
+                    continue
+                for fqdn in res:
+                    if fqdn.strip():
+                        interesting.append({"fqdn": fqdn.strip(), "pattern": pattern})
+            int_new, int_existing = await upsert_interesting_subdomains(
+                session, target.id, interesting
+            )
+            console.print(
+                f"[green]interesting_subdomains[/green] "
+                f"{{'new': {int_new}, 'existing': {int_existing}}}"
+            )
+        except ToolNotFoundError:
+            pass
+
     summary = format_cli_summary(payload)
     if summary:
         console.print()
@@ -123,6 +154,8 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
     elif notify:
         message = format_message(payload)
         if message:
+            if int_new:
+                message += f"\n\n{int_new} interesting subdomains flagged"
             sent = await dispatch(message)
             if sent:
                 console.print("[dim]notification sent[/dim]")
@@ -210,6 +243,76 @@ show_app = typer.Typer(
 )
 app.add_typer(show_app)
 app.add_typer(show_app, name="ls")
+
+
+def _render_interesting_subdomains_table(rows: list[InterestingSubdomainRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("fqdn", overflow="fold")
+    table.add_column("pattern", style="bold yellow")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(r.fqdn, r.pattern, r.first_seen_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_interesting_subdomains(
+    target_name: str | None,
+    pattern: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_interesting_subdomains(session, target_id, pattern=pattern, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "fqdn": r.fqdn,
+                        "pattern": r.pattern,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no interesting subdomains found[/yellow]")
+        return
+
+    console.print(_render_interesting_subdomains_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("interesting-subdomains")
+def show_interesting_subdomains(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    pattern: str | None = typer.Option(
+        None, "--pattern", help="Filter by gf pattern (e.g. takeovers, wotd-subdomains)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List subdomains flagged by gf pattern matching."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_interesting_subdomains(target, pattern, effective_limit, as_json))
 
 
 def _render_table(rows: list[SubdomainRow]) -> Table:
