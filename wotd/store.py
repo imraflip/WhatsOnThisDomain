@@ -15,6 +15,7 @@ from wotd.models import (
     HttpService,
     JsEndpoint,
     JsFile,
+    JsSecret,
     ScanRun,
     Subdomain,
     Target,
@@ -26,6 +27,17 @@ class JsFileRow:
     url: str
     host: str
     sources: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class JsSecretRow:
+    kind: str
+    data: str
+    severity: str | None
+    context: str | None
+    source_js_url: str
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -642,6 +654,93 @@ async def list_js_endpoints(
             host=r[1],
             method=r[2],
             params=r[3],
+            source_js_url=r[4],
+            first_seen_at=r[5],
+            last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
+
+
+async def upsert_js_secrets(
+    session: AsyncSession,
+    target_id: int,
+    secrets: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Insert new JS secrets, refresh last_seen on existing ones.
+
+    Each dict must contain 'source_js_url', 'kind', 'data'; other fields optional.
+    Returns (new_count, existing_count).
+    """
+    if not secrets:
+        return (0, 0)
+
+    keys = [(str(s["source_js_url"]), str(s["kind"]), str(s["data"])) for s in secrets]
+    result = await session.execute(
+        select(JsSecret).where(JsSecret.target_id == target_id)
+    )
+    existing = {
+        (r.source_js_url, r.kind, r.data): r for r in result.scalars().all()
+    }
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for s, key in zip(secrets, keys, strict=True):
+        row: JsSecret | None = existing.get(key)
+        if row is None:
+            session.add(
+                JsSecret(
+                    target_id=target_id,
+                    source_js_url=key[0],
+                    kind=key[1],
+                    data=key[2],
+                    severity=s.get("severity"),
+                    context=s.get("context"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
+
+
+async def list_js_secrets(
+    session: AsyncSession,
+    target_id: int | None = None,
+    kind: str | None = None,
+    severity: str | None = None,
+    limit: int | None = None,
+) -> list[JsSecretRow]:
+    stmt = select(
+        JsSecret.kind,
+        JsSecret.data,
+        JsSecret.severity,
+        JsSecret.context,
+        JsSecret.source_js_url,
+        JsSecret.first_seen_at,
+        JsSecret.last_seen_at,
+    ).order_by(JsSecret.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(JsSecret.target_id == target_id)
+    if kind is not None:
+        stmt = stmt.where(JsSecret.kind == kind)
+    if severity is not None:
+        stmt = stmt.where(JsSecret.severity == severity)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        JsSecretRow(
+            kind=r[0],
+            data=r[1],
+            severity=r[2],
+            context=r[3],
             source_js_url=r[4],
             first_seen_at=r[5],
             last_seen_at=r[6],

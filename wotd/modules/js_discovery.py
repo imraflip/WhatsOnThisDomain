@@ -19,6 +19,7 @@ from wotd.store import (
     get_js_urls_from_endpoints,
     upsert_js_endpoints,
     upsert_js_files,
+    upsert_js_secrets,
 )
 from wotd.tools import ToolNotFoundError, run_tool
 
@@ -43,6 +44,30 @@ async def _run_getjs(urls: list[str]) -> list[str]:
         timeout=300.0,
     )
     return parse_lines(result.stdout)
+
+
+async def _jsluice_secrets(js_url: str) -> list[dict[str, Any]]:
+    """Fetch a JS file with curl and extract secrets with jsluice."""
+    curl = await run_tool(
+        "curl",
+        ["-s", "--max-time", "15", "--", js_url],
+        timeout=20.0,
+    )
+    if not curl.stdout.strip():
+        return []
+    jsluice = await run_tool(
+        "jsluice",
+        ["secrets"],
+        stdin_data=curl.stdout,
+        timeout=30.0,
+    )
+    out: list[dict[str, Any]] = []
+    for line in parse_lines(jsluice.stdout):
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return out
 
 
 async def _jsluice_urls(js_url: str) -> list[dict[str, Any]]:
@@ -128,18 +153,26 @@ class JsDiscoveryModule(Module):
         all_js_urls = await get_js_file_urls(self.session, self.target.id)
         sem = asyncio.Semaphore(_JSLUICE_CONCURRENCY)
 
-        async def _process(js_url: str) -> tuple[str, list[dict[str, Any]]]:
+        async def _process(
+            js_url: str,
+        ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
             async with sem:
                 try:
-                    return js_url, await _jsluice_urls(js_url)
+                    urls_out, secrets_out = await asyncio.gather(
+                        _jsluice_urls(js_url),
+                        _jsluice_secrets(js_url),
+                    )
+                    return js_url, urls_out, secrets_out
                 except Exception:
-                    return js_url, []
+                    return js_url, [], []
 
         js_results = await asyncio.gather(*[_process(u) for u in all_js_urls])
 
         endpoint_dicts: list[dict[str, Any]] = []
-        for js_url, items in js_results:
-            for item in items:
+        secret_dicts: list[dict[str, Any]] = []
+
+        for js_url, url_items, secret_items in js_results:
+            for item in url_items:
                 raw_url = item.get("url", "")
                 if not raw_url:
                     continue
@@ -159,8 +192,26 @@ class JsDiscoveryModule(Module):
                     }
                 )
 
+            for item in secret_items:
+                kind = item.get("kind", "")
+                data = item.get("data")
+                if not kind or data is None:
+                    continue
+                secret_dicts.append(
+                    {
+                        "source_js_url": js_url,
+                        "kind": kind,
+                        "data": json.dumps(data, sort_keys=True),
+                        "severity": item.get("severity"),
+                        "context": json.dumps(item["context"]) if item.get("context") else None,
+                    }
+                )
+
         new_ep, existing_ep, new_ep_urls = await upsert_js_endpoints(
             self.session, self.target.id, endpoint_dicts
+        )
+        new_sec, existing_sec = await upsert_js_secrets(
+            self.session, self.target.id, secret_dicts
         )
 
         stats: dict[str, object] = {
@@ -170,6 +221,8 @@ class JsDiscoveryModule(Module):
             "js_files_existing": existing_js,
             "js_endpoints_new": new_ep,
             "js_endpoints_existing": existing_ep,
+            "js_secrets_new": new_sec,
+            "js_secrets_existing": existing_sec,
             "new_js_urls": new_js_urls,
             "new_ep_urls": new_ep_urls,
         }

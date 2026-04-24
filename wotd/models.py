@@ -147,6 +147,29 @@ class JsEndpoint(Base):
     )
 
 
+class JsSecret(Base):
+    __tablename__ = "js_secrets"
+    __table_args__ = (
+        UniqueConstraint("target_id", "source_js_url", "kind", "data", name="uq_js_secret"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    source_js_url: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class DnsRecord(Base):
     __tablename__ = "dns_records"
     __table_args__ = (
