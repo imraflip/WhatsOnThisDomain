@@ -14,7 +14,7 @@ from wotd.store import upsert_subdomains
 from wotd.tools import ToolNotFoundError, run_tool
 from wotd.utils.resolvers import ensure_resolvers_fresh
 
-DEFAULT_WORDLIST = Path("/opt/wotd/wordlists/dns.txt")
+DEFAULT_WORDLIST = Path("/opt/wotd/wordlists/httparchive_subdomains.txt")
 DEFAULT_RESOLVERS = Path("/opt/wotd/resolvers.txt")
 
 
