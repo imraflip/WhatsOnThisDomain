@@ -30,11 +30,11 @@ class DirBruteModule(Module):
         target: Target,
         scope: Scope,
         base_url: str,
-        tech: str | None = None,
+        tech_wordlists: list[str] | None = None,
     ) -> None:
         super().__init__(session, target, scope)
         self.base_url = base_url.rstrip("/")
-        self.tech = tech
+        self.tech_wordlists = tech_wordlists or []
 
     async def _ffuf_pass(self, wordlist: str, label: str) -> list[dict[str, object]]:
         fuzz_url = f"{self.base_url}/FUZZ"
@@ -77,9 +77,7 @@ class DirBruteModule(Module):
         return findings
 
     async def run(self) -> ModuleResult:
-        wordlists = list(_WORDLISTS_PRIMARY)
-        if self.tech:
-            wordlists.append(f"/opt/wotd/wordlists/tech_{self.tech}.txt")
+        wordlists = list(_WORDLISTS_PRIMARY) + list(self.tech_wordlists)
 
         all_findings: list[dict[str, object]] = []
         for wl in wordlists:

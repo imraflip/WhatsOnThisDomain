@@ -1091,10 +1091,26 @@ async def upsert_tech_detections(
             new_count += 1
         else:
             row.last_seen_at = now
+            new_wordlist_key = d.get("wordlist_key")
+            if row.wordlist_key is None and new_wordlist_key is not None:
+                row.wordlist_key = new_wordlist_key
             existing_count += 1
 
     await session.commit()
     return (new_count, existing_count)
+
+
+async def get_tech_wordlist_keys(session: AsyncSession, target_id: int) -> list[str]:
+    """Return distinct non-null wordlist_key values for a target's tech detections."""
+    result = await session.execute(
+        select(TechDetection.wordlist_key)
+        .where(
+            TechDetection.target_id == target_id,
+            TechDetection.wordlist_key.isnot(None),
+        )
+        .distinct()
+    )
+    return sorted({row[0] for row in result.all() if row[0]})
 
 
 async def list_tech_detections(
