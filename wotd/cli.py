@@ -36,6 +36,7 @@ from wotd.store import (
     JsFileRow,
     JsSecretRow,
     SubdomainRow,
+    TechDetectionRow,
     create_target,
     finish_scan_run,
     get_http_service_urls,
@@ -51,6 +52,7 @@ from wotd.store import (
     list_js_files,
     list_js_secrets,
     list_subdomains,
+    list_tech_detections,
     start_scan_run,
     upsert_interesting_subdomains,
 )
@@ -148,6 +150,9 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
         except ToolNotFoundError:
             pass
 
+    new_techs = results.get("subdomains_probe", None)
+    new_techs_count = new_techs.stats.get("new_techs", 0) if new_techs else 0
+
     summary = format_cli_summary(payload)
     if summary:
         console.print()
@@ -160,6 +165,8 @@ async def _run_subdomains(target_name: str, notify: bool = False) -> None:
         if message:
             if int_new:
                 message += f"\n\n{int_new} interesting subdomains flagged"
+            if new_techs_count:
+                message += f"\n\n{new_techs_count} new tech detections"
             sent = await dispatch(message)
             if sent:
                 console.print("[dim]notification sent[/dim]")
@@ -1272,6 +1279,88 @@ def show_js_files(
     asyncio.run(_show_js_files(target, effective_limit, as_json))
 
 
+def _render_tech_detections_table(rows: list[TechDetectionRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("tech", style="bold cyan")
+    table.add_column("source", style="dim")
+    table.add_column("wordlist key", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(
+            r.url,
+            r.tech,
+            r.source,
+            r.wordlist_key or "-",
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_tech_detections(
+    target_name: str | None,
+    tech: str | None,
+    url: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_tech_detections(
+            session, target_id, tech=tech, url=url, limit=limit
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "tech": r.tech,
+                        "source": r.source,
+                        "wordlist_key": r.wordlist_key,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no tech detections found[/yellow]")
+        return
+
+    console.print(_render_tech_detections_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("tech-detections")
+def show_tech_detections(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    tech: str | None = typer.Option(None, "--tech", help="Filter by exact tech name (e.g. PHP)."),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact URL."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List technology detections stored in the database."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_tech_detections(target, tech, url, effective_limit, as_json))
+
+
 _EXAMPLES = """\
 [bold]Subdomain enumeration[/bold]
   wotd subdomains acme.com               full pipeline (passive → active → resolve → probe)
@@ -1313,6 +1402,12 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --wordlist tech_php  filter by wordlist pass
   wotd show dir-results acme.com --since 24h  found in the last day
   wotd show dir-results acme.com --json      raw json output
+
+[bold]Tech detections[/bold]
+  wotd show tech-detections acme.com           latest 25 detections
+  wotd show tech-detections acme.com --all     every row, no limit
+  wotd show tech-detections acme.com --tech PHP   filter by tech name
+  wotd show tech-detections acme.com --json    raw json output
 
 [bold]JS file discovery[/bold]
   wotd discover-js acme.com                    collect JS files from endpoints + subjs

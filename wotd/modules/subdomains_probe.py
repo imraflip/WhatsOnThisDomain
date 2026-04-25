@@ -6,7 +6,7 @@ from typing import Any
 
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import parse_jsonl
-from wotd.store import get_unprobed_hosts, upsert_http_services
+from wotd.store import get_unprobed_hosts, upsert_http_services, upsert_tech_detections
 from wotd.tools import ToolNotFoundError, run_tool
 
 
@@ -87,6 +87,19 @@ class SubdomainsProbeModule(Module):
             self.session, self.target.id, services
         )
 
+        tech_detections = []
+        for svc in services:
+            if svc.get("tech"):
+                for t in svc["tech"].split(","):
+                    t = t.strip()
+                    if t:
+                        tech_detections.append(
+                            {"url": svc["url"], "tech": t, "source": "subdomains_probe"}
+                        )
+        new_techs, _ = await upsert_tech_detections(
+            self.session, self.target.id, tech_detections
+        )
+
         return ModuleResult(
             module=self.name,
             stats={
@@ -94,6 +107,7 @@ class SubdomainsProbeModule(Module):
                 "alive": len(services),
                 "new": new_count,
                 "existing": existing_count,
+                "new_techs": new_techs,
                 "errors": errors,
             },
         )

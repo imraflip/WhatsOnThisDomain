@@ -22,6 +22,7 @@ from wotd.models import (
     ScanRun,
     Subdomain,
     Target,
+    TechDetection,
 )
 
 
@@ -1032,6 +1033,108 @@ async def upsert_dir_results(
 
     await session.commit()
     return new_count, existing_count, new_urls, changed_urls
+
+
+@dataclass
+class TechDetectionRow:
+    url: str
+    tech: str
+    source: str
+    wordlist_key: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+async def upsert_tech_detections(
+    session: AsyncSession,
+    target_id: int,
+    detections: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Upsert tech detection rows. Returns (new_count, existing_count).
+
+    Each dict must contain 'url' and 'tech'; 'source' and 'wordlist_key' are optional.
+    """
+    if not detections:
+        return (0, 0)
+
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for d in detections:
+        key = (str(d["url"]), str(d["tech"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+
+    result = await session.execute(
+        select(TechDetection).where(TechDetection.target_id == target_id)
+    )
+    existing = {(r.url, r.tech): r for r in result.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for d in unique:
+        key = (str(d["url"]), str(d["tech"]))
+        row: TechDetection | None = existing.get(key)
+        if row is None:
+            session.add(
+                TechDetection(
+                    target_id=target_id,
+                    url=key[0],
+                    tech=key[1],
+                    source=str(d.get("source", "")),
+                    wordlist_key=d.get("wordlist_key"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
+
+
+async def list_tech_detections(
+    session: AsyncSession,
+    target_id: int | None = None,
+    tech: str | None = None,
+    source: str | None = None,
+    url: str | None = None,
+    limit: int | None = 25,
+) -> list[TechDetectionRow]:
+    stmt = select(
+        TechDetection.url,
+        TechDetection.tech,
+        TechDetection.source,
+        TechDetection.wordlist_key,
+        TechDetection.first_seen_at,
+        TechDetection.last_seen_at,
+    ).order_by(TechDetection.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(TechDetection.target_id == target_id)
+    if tech is not None:
+        stmt = stmt.where(TechDetection.tech == tech)
+    if source is not None:
+        stmt = stmt.where(TechDetection.source == source)
+    if url is not None:
+        stmt = stmt.where(TechDetection.url == url)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        TechDetectionRow(
+            url=r[0],
+            tech=r[1],
+            source=r[2],
+            wordlist_key=r[3],
+            first_seen_at=r[4],
+            last_seen_at=r[5],
+        )
+        for r in result.all()
+    ]
 
 
 async def list_dir_results(
