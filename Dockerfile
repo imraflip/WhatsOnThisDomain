@@ -70,33 +70,38 @@ RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
     && cp bin/massdns /usr/local/bin/massdns \
     && rm -rf /tmp/massdns
 
-# Fetch DNS wordlists, resolvers, and raft fallback for dirbust.
-# Medium is the default (faster than huge, good coverage). Tiny is used by tests.
+# Static wordlists and resolvers fetched from GitHub.
+# dns_tiny.txt is used by integration tests. raft-large-{directories,files}.txt are dirbust
+# primary passes. n0kovo_subdomains_huge.txt is merged with httparchive_subdomains below.
 RUN mkdir -p /opt/wotd/wordlists \
-    && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_medium.txt \
-        -o /opt/wotd/wordlists/dns.txt \
     && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_tiny.txt \
         -o /opt/wotd/wordlists/dns_tiny.txt \
     && curl -fsSL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
         -o /opt/wotd/resolvers.txt \
     && curl -fsSL https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-directories.txt \
-        -o /opt/wotd/wordlists/raft-large-directories.txt
+        -o /opt/wotd/wordlists/raft-large-directories.txt \
+    && curl -fsSL https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-files.txt \
+        -o /opt/wotd/wordlists/raft-large-files.txt \
+    && curl -fsSL https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_huge.txt \
+        -o /opt/wotd/wordlists/n0kovo_subdomains_huge.txt
 
-# Fetch Assetnote wordlists into /opt/wotd/wordlists/ under stable normalized names.
-# Automated lists have dated filenames — we query the JSON index once with jq to resolve
-# the current filename, then download and store under a fixed name so module code is stable.
-# Manual lists have stable filenames and are fetched directly.
+# Fetch Assetnote wordlists and SecLists tech wordlists into /opt/wotd/wordlists/.
+# Automated Assetnote lists use dated filenames — jq resolves the current name at build
+# time and stores each list under a stable normalized name so module code never needs the date.
+# Tech wordlists stored as tech_{name}.txt for open-ended --tech flag resolution.
+# Subdomain lists merged and sorted; falls back to n0kovo alone if merged count > 4M lines.
 # set -e ensures any failed download aborts the build loudly.
 RUN set -e; \
     CDN="https://wordlists-cdn.assetnote.io/data"; \
+    SECLISTS="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content"; \
     curl -fsSL "${CDN}/automated.json" -o /tmp/assetnote_automated.json; \
     for entry in \
-        "httparchive_subdomains_:httparchive_subdomains.txt" \
+        "httparchive_subdomains_:httparchive_subdomains_raw.txt" \
         "httparchive_directories_1m_:httparchive_directories.txt" \
         "httparchive_js_2:httparchive_js.txt" \
-        "httparchive_php_:httparchive_php.txt" \
-        "httparchive_aspx_asp_cfm_svc_ashx_asmx_:httparchive_aspx.txt" \
-        "httparchive_jsp_jspa_do_action_:httparchive_jsp.txt" \
+        "httparchive_php_:tech_php.txt" \
+        "httparchive_aspx_asp_cfm_svc_ashx_asmx_:tech_dotnet.txt" \
+        "httparchive_jsp_jspa_do_action_:tech_java.txt" \
     ; do \
         prefix="${entry%%:*}"; \
         dest="${entry##*:}"; \
@@ -106,11 +111,40 @@ RUN set -e; \
         echo "Downloading ${fname} -> ${dest}"; \
         curl -fsSL "${CDN}/automated/${fname}" -o "/opt/wotd/wordlists/${dest}"; \
     done; \
-    curl -fsSL "${CDN}/manual/bak.txt" -o /opt/wotd/wordlists/bak.txt; \
-    curl -fsSL "${CDN}/manual/dot_filenames.txt" -o /opt/wotd/wordlists/dot_filenames.txt; \
-    cat /opt/wotd/wordlists/bak.txt /opt/wotd/wordlists/dot_filenames.txt \
-        > /opt/wotd/wordlists/sensitive_files.txt; \
-    rm /tmp/assetnote_automated.json
+    rm /tmp/assetnote_automated.json; \
+    cat /opt/wotd/wordlists/httparchive_subdomains_raw.txt \
+        /opt/wotd/wordlists/n0kovo_subdomains_huge.txt \
+        | sort -u > /opt/wotd/wordlists/httparchive_subdomains_merged.txt; \
+    merged_count=$(wc -l < /opt/wotd/wordlists/httparchive_subdomains_merged.txt); \
+    if [ "$merged_count" -gt 4000000 ]; then \
+        echo "Merged subdomain list has ${merged_count} lines (>4M), using n0kovo only"; \
+        cp /opt/wotd/wordlists/n0kovo_subdomains_huge.txt /opt/wotd/wordlists/httparchive_subdomains.txt; \
+    else \
+        echo "Using merged subdomain list (${merged_count} lines)"; \
+        cp /opt/wotd/wordlists/httparchive_subdomains_merged.txt /opt/wotd/wordlists/httparchive_subdomains.txt; \
+    fi; \
+    rm -f /opt/wotd/wordlists/httparchive_subdomains_raw.txt \
+          /opt/wotd/wordlists/httparchive_subdomains_merged.txt \
+          /opt/wotd/wordlists/n0kovo_subdomains_huge.txt; \
+    for entry in \
+        "Web-Servers/Apache-Axis.txt:tech_apache_axis.txt" \
+        "Web-Servers/Apache-Tomcat.txt:tech_apache_tomcat.txt" \
+        "Web-Servers/Apache.txt:tech_apache.txt" \
+        "Web-Servers/nginx.txt:tech_nginx.txt" \
+        "Service-Specific/Elasticsearch-Kibana.txt:tech_elasticsearch.txt" \
+        "Service-Specific/GitLab.txt:tech_gitlab.txt" \
+        "Service-Specific/Grafana.txt:tech_grafana.txt" \
+        "Service-Specific/IBM-WebSphere-Application-Server.txt:tech_websphere.txt" \
+        "Service-Specific/Jenkins-Hudson.txt:tech_jenkins.txt" \
+        "Service-Specific/Keycloak-Identity-Access-Management.txt:tech_keycloak.txt" \
+        "Service-Specific/Kubernetes.txt:tech_kubernetes.txt" \
+        "Service-Specific/Oracle-WebLogic.txt:tech_weblogic.txt" \
+    ; do \
+        src="${entry%%:*}"; \
+        dest="${entry##*:}"; \
+        echo "Downloading ${src} -> ${dest}"; \
+        curl -fsSL "${SECLISTS}/${src}" -o "/opt/wotd/wordlists/${dest}"; \
+    done
 
 WORKDIR /app
 

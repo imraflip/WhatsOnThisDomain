@@ -13,13 +13,11 @@ from wotd.scope import Scope
 from wotd.store import upsert_dir_results
 from wotd.tools import run_tool
 
-_WORDLIST_PRIMARY = "/opt/wotd/wordlists/httparchive_directories.txt"
-_WORDLIST_SENSITIVE = "/opt/wotd/wordlists/sensitive_files.txt"
-_WORDLIST_TECH: dict[str, str] = {
-    "php": "/opt/wotd/wordlists/httparchive_php.txt",
-    "java": "/opt/wotd/wordlists/httparchive_jsp.txt",
-    "dotnet": "/opt/wotd/wordlists/httparchive_aspx.txt",
-}
+_WORDLISTS_PRIMARY = [
+    "/opt/wotd/wordlists/httparchive_directories.txt",
+    "/opt/wotd/wordlists/raft-large-directories.txt",
+    "/opt/wotd/wordlists/raft-large-files.txt",
+]
 
 
 class DirBruteModule(Module):
@@ -77,9 +75,9 @@ class DirBruteModule(Module):
         return findings
 
     async def run(self) -> ModuleResult:
-        wordlists = [_WORDLIST_PRIMARY, _WORDLIST_SENSITIVE]
+        wordlists = list(_WORDLISTS_PRIMARY)
         if self.tech:
-            wordlists.append(_WORDLIST_TECH[self.tech])
+            wordlists.append(f"/opt/wotd/wordlists/tech_{self.tech}.txt")
 
         all_findings: list[dict[str, object]] = []
         for wl in wordlists:
