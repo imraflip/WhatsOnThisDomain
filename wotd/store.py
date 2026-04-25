@@ -973,6 +973,7 @@ class DirResultRow:
     status_code: int
     first_seen_at: datetime
     last_seen_at: datetime
+    wordlist: str | None = None
 
 
 async def upsert_dir_results(
@@ -1008,6 +1009,7 @@ async def upsert_dir_results(
                     url=url,
                     base_url=f["base_url"],
                     status_code=new_status,
+                    wordlist=f.get("wordlist"),
                     first_seen_at=now,
                     last_seen_at=now,
                 )
@@ -1038,6 +1040,7 @@ async def list_dir_results(
     since: timedelta | None = None,
     status_code: int | None = None,
     host: str | None = None,
+    wordlist: str | None = None,
     limit: int | None = 25,
 ) -> list[DirResultRow]:
     stmt = select(
@@ -1046,6 +1049,7 @@ async def list_dir_results(
         DirResult.status_code,
         DirResult.first_seen_at,
         DirResult.last_seen_at,
+        DirResult.wordlist,
     ).order_by(DirResult.first_seen_at.desc())
 
     if target_id is not None:
@@ -1056,6 +1060,8 @@ async def list_dir_results(
         stmt = stmt.where(DirResult.status_code == status_code)
     if host is not None:
         stmt = stmt.where(DirResult.url.like(f"%://{host}/%"))
+    if wordlist is not None:
+        stmt = stmt.where(DirResult.wordlist == wordlist)
     if limit is not None:
         stmt = stmt.limit(limit)
 
@@ -1067,6 +1073,7 @@ async def list_dir_results(
             status_code=r[2],
             first_seen_at=r[3],
             last_seen_at=r[4],
+            wordlist=r[5],
         )
         for r in result.all()
     ]

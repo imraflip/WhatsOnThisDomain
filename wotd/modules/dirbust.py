@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +36,7 @@ class DirBruteModule(Module):
         self.base_url = base_url.rstrip("/")
         self.tech = tech
 
-    async def _ffuf_pass(self, wordlist: str) -> list[dict[str, object]]:
+    async def _ffuf_pass(self, wordlist: str, label: str) -> list[dict[str, object]]:
         fuzz_url = f"{self.base_url}/FUZZ"
         result = await run_tool(
             "ffuf",
@@ -70,6 +71,7 @@ class DirBruteModule(Module):
                     "url": url,
                     "base_url": self.base_url,
                     "status_code": int(status),
+                    "wordlist": label,
                 }
             )
         return findings
@@ -81,7 +83,7 @@ class DirBruteModule(Module):
 
         all_findings: list[dict[str, object]] = []
         for wl in wordlists:
-            all_findings.extend(await self._ffuf_pass(wl))
+            all_findings.extend(await self._ffuf_pass(wl, Path(wl).stem))
 
         new_count, existing_count, new_urls, changed_urls = await upsert_dir_results(
             self.session, self.target.id, all_findings

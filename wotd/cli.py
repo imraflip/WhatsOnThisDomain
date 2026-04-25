@@ -38,6 +38,7 @@ from wotd.store import (
     SubdomainRow,
     create_target,
     finish_scan_run,
+    get_http_service_urls,
     get_resolved_hosts,
     get_subdomain_hosts,
     get_target_by_name,
@@ -800,9 +801,89 @@ async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) 
             console.print("[dim]notification sent[/dim]")
 
 
+async def _run_dirbust_target(
+    target_name: str, notify: bool = False, tech: str | None = None
+) -> None:
+    from wotd.modules.dirbust import DirBruteModule
+
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            console.print(
+                f"[red]error:[/red] target {target_name!r} not found — "
+                "run wotd subdomains first"
+            )
+            raise SystemExit(1)
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        service_urls = await get_http_service_urls(session, target.id)
+        if not service_urls:
+            console.print("[yellow]no live HTTP services found for this target[/yellow]")
+            return
+
+        is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
+
+        total_new = 0
+        total_changed = 0
+        all_new_urls: list[str] = []
+        all_changed_urls: list[str] = []
+
+        for svc_url in sorted(service_urls):
+            scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
+            module = DirBruteModule(session, target, scope, svc_url, tech=tech)
+            try:
+                result = await module.run()
+                await finish_scan_run(
+                    session, scan_run, "completed", summary=result.stats
+                )
+                console.print(
+                    f"[green]dirbust[/green] {svc_url} {_meta(result.stats)}"
+                )
+                total_new += result.stats.get("new", 0)
+                total_changed += result.stats.get("changed", 0)
+                all_new_urls.extend(result.stats.get("new_urls", []))
+                all_changed_urls.extend(result.stats.get("changed_urls", []))
+            except Exception as e:
+                await finish_scan_run(
+                    session, scan_run, "failed", summary={"error": str(e)}
+                )
+                console.print(f"[yellow]dirbust {svc_url} failed: {e}[/yellow]")
+
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and (total_new or total_changed):
+        parts = []
+        if total_new:
+            parts.append(f"{total_new} new paths")
+        if total_changed:
+            parts.append(f"{total_changed} status changes")
+        message = f"[wotd] {target_name} dirbust — " + ", ".join(parts)
+        sample = (all_new_urls + all_changed_urls)[:8]
+        if sample:
+            message += "\n\n" + "\n".join(sample)
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
 @app.command("dirbust")
 def dirbust(
-    url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
+    target_or_url: str = typer.Argument(
+        ...,
+        help=(
+            "Target domain (e.g. acme.com) or full URL with scheme "
+            "(e.g. https://acme.com). Domain mode scans all live HTTP services "
+            "stored for that target; URL mode scans only the given URL."
+        ),
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after bruteforcing finishes."
     ),
@@ -814,23 +895,25 @@ def dirbust(
         ),
     ),
 ) -> None:
-    """Bruteforce directories and files on a target URL.
+    """Bruteforce directories and files on a target.
 
     Always runs three passes: httparchive directories, raft-large-directories,
     and raft-large-files. Add --tech for a fourth tech-specific pass.
+
+    Pass a bare domain to scan all live HTTP services stored for that target
+    (requires a prior subdomains scan). Pass a full URL to scan only that
+    specific service.
     """
-    if "://" not in url:
-        console.print(
-            "[red]error:[/red] dirbust requires a full URL with scheme (e.g. https://acme.com)"
-        )
-        raise typer.Exit(code=2)
     if tech is not None and not Path(f"/opt/wotd/wordlists/tech_{tech}.txt").exists():
         console.print(
             f"[red]error:[/red] no wordlist for --tech {tech!r} "
             f"(expected /opt/wotd/wordlists/tech_{tech}.txt)"
         )
         raise typer.Exit(code=2)
-    asyncio.run(_run_dirbust(url, notify, tech))
+    if "://" in target_or_url:
+        asyncio.run(_run_dirbust(target_or_url, notify, tech))
+    else:
+        asyncio.run(_run_dirbust_target(target_or_url, notify, tech))
 
 
 @app.command("discover-js")
@@ -862,13 +945,13 @@ def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("url", overflow="fold")
     table.add_column("status", justify="right")
-    table.add_column("base url", overflow="fold", style="dim")
+    table.add_column("wordlist", style="dim")
     table.add_column("first seen", style="dim")
     for r in rows:
         table.add_row(
             r.url,
             str(r.status_code),
-            r.base_url,
+            r.wordlist or "-",
             r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
         )
     return table
@@ -879,6 +962,7 @@ async def _show_dir_results(
     since: timedelta | None,
     status_code: int | None,
     host: str | None,
+    wordlist: str | None,
     limit: int | None,
     as_json: bool,
 ) -> None:
@@ -893,7 +977,13 @@ async def _show_dir_results(
                 raise typer.Exit(code=1)
             target_id = target.id
         rows = await list_dir_results(
-            session, target_id, since=since, status_code=status_code, host=host, limit=limit
+            session,
+            target_id,
+            since=since,
+            status_code=status_code,
+            host=host,
+            wordlist=wordlist,
+            limit=limit,
         )
 
     if as_json:
@@ -904,6 +994,7 @@ async def _show_dir_results(
                         "url": r.url,
                         "base_url": r.base_url,
                         "status_code": r.status_code,
+                        "wordlist": r.wordlist,
                         "first_seen_at": r.first_seen_at.isoformat(),
                         "last_seen_at": r.last_seen_at.isoformat(),
                     }
@@ -929,6 +1020,10 @@ def show_dir_results(
     ),
     status: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
     host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    wordlist: str | None = typer.Option(
+        None, "--wordlist",
+        help="Filter by wordlist that found the path (e.g. httparchive_directories, tech_php).",
+    ),
     since: str | None = typer.Option(
         None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
     ),
@@ -952,7 +1047,9 @@ def show_dir_results(
                 raise typer.Exit(code=2) from e
         effective_limit = None if limit == 0 else limit
 
-    asyncio.run(_show_dir_results(target, since_td, status, host, effective_limit, as_json))
+    asyncio.run(
+        _show_dir_results(target, since_td, status, host, wordlist, effective_limit, as_json)
+    )
 
 
 def _render_js_files_table(rows: list[JsFileRow]) -> Table:
@@ -1206,13 +1303,14 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dirbust https://acme.com              three passes: httparchive dirs, raft dirs, raft files
-  wotd dirbust https://acme.com --tech php   add a fourth PHP-specific pass
-  wotd dirbust https://acme.com --notify     also dispatch notification on new/changed paths
+  wotd dirbust acme.com                      scan all live HTTP services for target
+  wotd dirbust https://acme.com              scan only this specific URL
+  wotd dirbust acme.com --tech php           add a fourth PHP-specific pass
+  wotd dirbust acme.com --notify             also dispatch notification on new/changed paths
   wotd show dir-results acme.com             latest 25 results
   wotd show dir-results acme.com --all       every result, no limit
   wotd show dir-results acme.com --status 200  filter by status code
-  wotd show dir-results acme.com --host sub.acme.com  filter by host
+  wotd show dir-results acme.com --wordlist tech_php  filter by wordlist pass
   wotd show dir-results acme.com --since 24h  found in the last day
   wotd show dir-results acme.com --json      raw json output
 

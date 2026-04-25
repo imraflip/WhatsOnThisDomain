@@ -220,6 +220,7 @@ class DirResult(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    wordlist: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
