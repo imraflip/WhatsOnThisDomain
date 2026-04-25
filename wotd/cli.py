@@ -19,6 +19,7 @@ from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
+from wotd.modules.tech_detect import TechDetectModule
 from wotd.notify import (
     NewHost,
     NotifyPayload,
@@ -43,6 +44,7 @@ from wotd.store import (
     get_resolved_hosts,
     get_subdomain_hosts,
     get_target_by_name,
+    get_tech_wordlist_keys,
     has_prior_scan,
     list_dir_results,
     list_endpoints,
@@ -245,6 +247,64 @@ def subdomains(
     hosts are diffed against the previous scan and persisted to the local db.
     """
     asyncio.run(_run_subdomains(target, notify))
+
+
+async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            console.print(
+                f"[red]error:[/red] target {target_name!r} not found — "
+                "run wotd subdomains first"
+            )
+            raise typer.Exit(code=1)
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, TechDetectModule.name)
+
+        scan_run = await start_scan_run(session, target.id, TechDetectModule.name)
+        module = TechDetectModule(session, target, scope)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{TechDetectModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = f"[wotd] {target_name} tech-detect — {new_count} new tech detections"
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+@app.command("tech-detect")
+def tech_detect(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Re-detect technologies on all live HTTP services for a target.
+
+    Runs httpx-pd with -tech-detect against every URL stored in http_services and
+    upserts findings into tech_detections, populating wordlist_key for techs
+    that have a mapped wordlist (PHP, Java, Apache, Nginx, etc.). Use after
+    subdomains to get fresher data — subdomains only probes newly-found hosts.
+    """
+    asyncio.run(_run_tech_detect(target, notify))
 
 
 show_app = typer.Typer(
@@ -752,6 +812,34 @@ async def _run_discover_js(url: str, notify: bool = False, bruteforce_js: bool =
             console.print("[dim]notification sent[/dim]")
 
 
+async def _resolve_tech_wordlists(
+    session: AsyncSession,
+    target_id: int,
+    manual_tech: str | None,
+) -> tuple[list[str], list[str], bool]:
+    """Resolve tech wordlists from tech_detections + optional manual --tech.
+
+    Returns (wordlist paths, auto-detected keys included, has_any_detections).
+    Auto keys come from tech_detections; manual_tech is added on top if provided.
+    Filters to wordlists that exist on disk. has_any_detections lets the caller
+    decide whether to print the 'run tech-detect first' hint.
+    """
+    auto_keys = set(await get_tech_wordlist_keys(session, target_id))
+    has_any_detections = bool(auto_keys)
+    all_keys = auto_keys | ({manual_tech} if manual_tech else set())
+
+    paths: list[str] = []
+    auto_included: list[str] = []
+    for key in sorted(all_keys):
+        path = f"/opt/wotd/wordlists/tech_{key}.txt"
+        if not Path(path).exists():
+            continue
+        paths.append(path)
+        if key in auto_keys:
+            auto_included.append(key)
+    return paths, auto_included, has_any_detections
+
+
 async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) -> None:
     from urllib.parse import urlparse
 
@@ -775,10 +863,21 @@ async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) 
             ],
         )
 
+        tech_paths, auto_keys, has_detections = await _resolve_tech_wordlists(
+            session, target.id, tech
+        )
+        if auto_keys:
+            console.print(f"[dim][auto-tech] {' '.join(auto_keys)}[/dim]")
+        elif tech is None and not has_detections:
+            console.print(
+                "[dim]no tech detections — "
+                "run `wotd tech-detect` first for tech-specific passes[/dim]"
+            )
+
         is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
 
         scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
-        module = DirBruteModule(session, target, scope, url, tech=tech)
+        module = DirBruteModule(session, target, scope, url, tech_wordlists=tech_paths)
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
@@ -836,6 +935,17 @@ async def _run_dirbust_target(
             console.print("[yellow]no live HTTP services found for this target[/yellow]")
             return
 
+        tech_paths, auto_keys, has_detections = await _resolve_tech_wordlists(
+            session, target.id, tech
+        )
+        if auto_keys:
+            console.print(f"[dim][auto-tech] {' '.join(auto_keys)}[/dim]")
+        elif tech is None and not has_detections:
+            console.print(
+                "[dim]no tech detections — "
+                "run `wotd tech-detect` first for tech-specific passes[/dim]"
+            )
+
         is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
 
         total_new = 0
@@ -845,7 +955,9 @@ async def _run_dirbust_target(
 
         for svc_url in sorted(service_urls):
             scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
-            module = DirBruteModule(session, target, scope, svc_url, tech=tech)
+            module = DirBruteModule(
+                session, target, scope, svc_url, tech_wordlists=tech_paths
+            )
             try:
                 result = await module.run()
                 await finish_scan_run(
@@ -897,15 +1009,17 @@ def dirbust(
     tech: str | None = typer.Option(
         None, "--tech",
         help=(
-            "Run an extra tech-specific wordlist pass "
+            "Force an extra tech-specific wordlist pass on top of auto-tech "
             "(e.g. php, java, dotnet, apache, nginx, grafana, kubernetes)."
         ),
     ),
 ) -> None:
     """Bruteforce directories and files on a target.
 
-    Always runs three passes: httparchive directories, raft-large-directories,
-    and raft-large-files. Add --tech for a fourth tech-specific pass.
+    Always runs three primary passes: httparchive directories, raft-large-directories,
+    and raft-large-files. Auto-appends tech_{key}.txt passes for every distinct
+    wordlist_key in the target's tech_detections (populated by subdomains and
+    tech-detect). Use --tech to force-add an additional pass not in the store.
 
     Pass a bare domain to scan all live HTTP services stored for that target
     (requires a prior subdomains scan). Pass a full URL to scan only that
@@ -1392,9 +1506,9 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dirbust acme.com                      scan all live HTTP services for target
-  wotd dirbust https://acme.com              scan only this specific URL
-  wotd dirbust acme.com --tech php           add a fourth PHP-specific pass
+  wotd dirbust acme.com                      scan all live HTTP services + auto-tech passes
+  wotd dirbust https://acme.com              scan only this URL + auto-tech passes
+  wotd dirbust acme.com --tech grafana       force a specific tech pass on top of auto-tech
   wotd dirbust acme.com --notify             also dispatch notification on new/changed paths
   wotd show dir-results acme.com             latest 25 results
   wotd show dir-results acme.com --all       every result, no limit
@@ -1404,10 +1518,12 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --json      raw json output
 
 [bold]Tech detections[/bold]
-  wotd show tech-detections acme.com           latest 25 detections
-  wotd show tech-detections acme.com --all     every row, no limit
-  wotd show tech-detections acme.com --tech PHP   filter by tech name
-  wotd show tech-detections acme.com --json    raw json output
+  wotd tech-detect acme.com                     re-run httpx -tech-detect on all live hosts
+  wotd tech-detect acme.com --notify            also dispatch notification on new detections
+  wotd show tech-detections acme.com            latest 25 detections
+  wotd show tech-detections acme.com --all      every row, no limit
+  wotd show tech-detections acme.com --tech PHP filter by tech name
+  wotd show tech-detections acme.com --json     raw json output
 
 [bold]JS file discovery[/bold]
   wotd discover-js acme.com                    collect JS files from endpoints + subjs
