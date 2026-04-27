@@ -17,6 +17,7 @@ from wotd.modules.api_graphql import ApiGraphqlModule
 from wotd.modules.api_kiterunner import ApiKiterunnerModule
 from wotd.modules.api_openapi import ApiOpenApiModule
 from wotd.modules.api_passive import ApiPassiveModule
+from wotd.modules.archive_delta import ArchiveDeltaModule
 from wotd.modules.base import ModuleResult
 from wotd.modules.crawl import CrawlModule
 from wotd.modules.subdomains_active import SubdomainsActiveModule
@@ -36,6 +37,7 @@ from wotd.store import (
     ApiRouteRow,
     ApiSpecRow,
     DirResultRow,
+    EndpointDeltaRow,
     EndpointRow,
     GraphqlEndpointRow,
     InterestingEndpointRow,
@@ -56,6 +58,7 @@ from wotd.store import (
     list_api_routes,
     list_api_specs,
     list_dir_results,
+    list_endpoint_deltas,
     list_graphql_endpoints,
     list_endpoints,
     list_interesting_endpoints,
@@ -2113,20 +2116,100 @@ async def _show_tech_detections(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
-@show_app.command("tech-detections")
-def show_tech_detections(
+@show_app.command("endpoint-deltas")
+def show_endpoint_deltas(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
     ),
-    tech: str | None = typer.Option(None, "--tech", help="Filter by exact tech name (e.g. PHP)."),
-    url: str | None = typer.Option(None, "--url", help="Filter by exact URL."),
+    kind: str | None = typer.Option(
+        None, "--kind",
+        help="Filter by change type: status_changed, content_type_changed, title_changed, body_hash_changed, unreachable.",
+    ),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows observed within this window (e.g. 24h, 7d)."
+    ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
     as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
 ) -> None:
-    """List technology detections stored in the database."""
+    """List endpoint state changes (deltas) from archive-delta scans.
+    
+    Shows changes detected across scans: status code changes, content-type shifts,
+    page title changes, body content hashes, and unreachable endpoints.
+    """
+    since_td: timedelta | None = None
+    if since:
+        try:
+            since_td = parse_duration(since)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=2) from e
+    
     effective_limit: int | None = None if all_rows or limit == 0 else limit
-    asyncio.run(_show_tech_detections(target, tech, url, effective_limit, as_json))
+    asyncio.run(_show_endpoint_deltas(target, kind, url, since_td, effective_limit, as_json))
+
+
+def _render_endpoint_deltas_table(rows: list[EndpointDeltaRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("kind", style="bold yellow")
+    table.add_column("old", overflow="fold", style="dim")
+    table.add_column("new", overflow="fold", style="dim")
+    table.add_column("observed", style="dim")
+    for r in rows:
+        old_str = str(r.old_value)[:20] if r.old_value else "-"
+        new_str = str(r.new_value)[:20] if r.new_value else "-"
+        table.add_row(r.url, r.kind, old_str, new_str, r.observed_at.strftime("%Y-%m-%d %H:%M"))
+    return table
+
+
+async def _show_endpoint_deltas(
+    target_name: str | None,
+    kind: str | None,
+    url: str | None,
+    since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_endpoint_deltas(
+            session, target_id=target_id, kind=kind, url=url, since=since, limit=limit
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "kind": r.kind,
+                        "old_value": r.old_value,
+                        "new_value": r.new_value,
+                        "observed_at": r.observed_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no endpoint deltas found[/yellow]")
+        return
+
+    console.print(_render_endpoint_deltas_table(rows))
+    console.print(f"[dim]{len(rows)} change(s)[/dim]")
 
 
 _EXAMPLES = """\

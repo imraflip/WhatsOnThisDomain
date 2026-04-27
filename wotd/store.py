@@ -15,6 +15,7 @@ from wotd.models import (
     DirResult,
     DnsRecord,
     Endpoint,
+    EndpointSnapshot,
     GraphqlEndpoint,
     HttpService,
     InterestingEndpoint,
@@ -97,6 +98,25 @@ class SubdomainRow:
     status_code: int | None
     title: str | None
     url: str | None
+
+
+@dataclass
+class EndpointSnapshotRow:
+    url: str
+    status_code: int | None
+    content_type: str | None
+    body_hash: str | None
+    title: str | None
+    observed_at: datetime
+
+
+@dataclass
+class EndpointDeltaRow:
+    url: str
+    kind: str
+    old_value: str | None
+    new_value: str | None
+    observed_at: datetime
 
 
 async def list_subdomains(
@@ -1556,3 +1576,180 @@ async def list_api_specs(
         )
         for r in result.all()
     ]
+
+
+async def get_latest_endpoint_snapshot(
+    session: AsyncSession,
+    target_id: int,
+    url: str,
+) -> EndpointSnapshot | None:
+    """Get the most recent snapshot for a specific endpoint URL."""
+    result = await session.execute(
+        select(EndpointSnapshot)
+        .where(EndpointSnapshot.target_id == target_id, EndpointSnapshot.url == url)
+        .order_by(EndpointSnapshot.observed_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def insert_endpoint_snapshots(
+    session: AsyncSession,
+    target_id: int,
+    snapshots: list[dict[str, Any]],
+    scan_run_id: int | None = None,
+) -> int:
+    """Bulk insert endpoint snapshots and return count inserted."""
+    if not snapshots:
+        return 0
+
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        session.add(
+            EndpointSnapshot(
+                target_id=target_id,
+                url=snapshot["url"],
+                status_code=snapshot.get("status_code"),
+                content_type=snapshot.get("content_type"),
+                body_hash=snapshot.get("body_hash"),
+                title=snapshot.get("title"),
+                observed_at=now,
+                scan_run_id=scan_run_id,
+            )
+        )
+
+    await session.commit()
+    return len(snapshots)
+
+
+async def list_endpoint_deltas(
+    session: AsyncSession,
+    target_id: int | None = None,
+    url: str | None = None,
+    kind: str | None = None,
+    since: timedelta | None = None,
+    limit: int | None = 25,
+) -> list[EndpointDeltaRow]:
+    """Query endpoint deltas. Each row represents one changed field for one URL from one probe.
+    
+    Rows ordered by observed_at desc (most recent first).
+    
+    kind filter values: status_changed, content_type_changed, title_changed, body_hash_changed, unreachable
+    """
+    # Subquery to find prior snapshot for each URL
+    p = aliased(EndpointSnapshot)
+    
+    stmt = select(
+        EndpointSnapshot.url,
+        EndpointSnapshot.status_code,
+        EndpointSnapshot.content_type,
+        EndpointSnapshot.body_hash,
+        EndpointSnapshot.title,
+        EndpointSnapshot.observed_at,
+        p.status_code,
+        p.content_type,
+        p.body_hash,
+        p.title,
+    ).select_from(EndpointSnapshot)
+    
+    # Left join to previous snapshot (ordered by observed_at, take the one just before current)
+    stmt = stmt.outerjoin(
+        p,
+        (p.target_id == EndpointSnapshot.target_id)
+        & (p.url == EndpointSnapshot.url)
+        & (p.observed_at < EndpointSnapshot.observed_at),
+    )
+    
+    if target_id is not None:
+        stmt = stmt.where(EndpointSnapshot.target_id == target_id)
+    if url is not None:
+        stmt = stmt.where(EndpointSnapshot.url == url)
+    if since is not None:
+        cutoff = datetime.now(UTC) - since
+        stmt = stmt.where(EndpointSnapshot.observed_at >= cutoff)
+    
+    stmt = stmt.order_by(EndpointSnapshot.observed_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    
+    result = await session.execute(stmt)
+    rows: list[EndpointDeltaRow] = []
+    
+    for row in result.all():
+        current_url = row[0]
+        current_status = row[1]
+        current_content_type = row[2]
+        current_body_hash = row[3]
+        current_title = row[4]
+        observed_at = row[5]
+        prior_status = row[6]
+        prior_content_type = row[7]
+        prior_body_hash = row[8]
+        prior_title = row[9]
+        
+        # If no prior snapshot, can't determine change type
+        if prior_status is None and prior_content_type is None and prior_body_hash is None and prior_title is None:
+            # This is the first snapshot or all priors are null
+            continue
+        
+        # Classify changes
+        if current_status is None and prior_status is not None:
+            rows.append(
+                EndpointDeltaRow(
+                    url=current_url,
+                    kind="unreachable",
+                    old_value=str(prior_status) if prior_status else None,
+                    new_value=None,
+                    observed_at=observed_at,
+                )
+            )
+        elif current_status != prior_status and prior_status is not None:
+            rows.append(
+                EndpointDeltaRow(
+                    url=current_url,
+                    kind="status_changed",
+                    old_value=str(prior_status) if prior_status else None,
+                    new_value=str(current_status) if current_status else None,
+                    observed_at=observed_at,
+                )
+            )
+        
+        if current_content_type != prior_content_type and (kind is None or kind == "content_type_changed"):
+            rows.append(
+                EndpointDeltaRow(
+                    url=current_url,
+                    kind="content_type_changed",
+                    old_value=prior_content_type,
+                    new_value=current_content_type,
+                    observed_at=observed_at,
+                )
+            )
+        
+        if current_title != prior_title and (kind is None or kind == "title_changed"):
+            rows.append(
+                EndpointDeltaRow(
+                    url=current_url,
+                    kind="title_changed",
+                    old_value=prior_title,
+                    new_value=current_title,
+                    observed_at=observed_at,
+                )
+            )
+        
+        if current_body_hash != prior_body_hash and (kind is None or kind == "body_hash_changed"):
+            rows.append(
+                EndpointDeltaRow(
+                    url=current_url,
+                    kind="body_hash_changed",
+                    old_value=prior_body_hash,
+                    new_value=current_body_hash,
+                    observed_at=observed_at,
+                )
+            )
+    
+    # Filter by kind if requested
+    if kind is not None:
+        rows = [r for r in rows if r.kind == kind]
+    
+    return rows
+
