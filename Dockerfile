@@ -53,6 +53,11 @@ RUN go install github.com/lc/subjs@latest \
 # Directory bruteforcing
 RUN go install github.com/ffuf/ffuf/v2@latest
 
+# Visual surface capture:
+# gowitness is the primary screenshot engine. It expects a headless browser runtime
+# (chromium/chrome) when used directly; the module falls back to httpx-pd -ss when needed.
+RUN go install github.com/sensepost/gowitness@latest
+
 # API discovery tools
 # kr (kiterunner): method-aware REST API route bruteforcer; .kite corpus replays the right verb
 # sj: BishopFox Swagger Jacker — extracts endpoints from OpenAPI/Swagger specs with $ref support

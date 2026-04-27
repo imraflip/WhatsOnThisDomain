@@ -44,6 +44,7 @@ async def run_tool(
     stdin_data: str | None = None,
     timeout: float | None = 300.0,
     check_exists: bool = True,
+    cwd: str | None = None,
 ) -> ToolResult:
     """Run an external tool and capture its output.
 
@@ -59,6 +60,7 @@ async def run_tool(
         stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
 
     try:

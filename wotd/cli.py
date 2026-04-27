@@ -26,6 +26,7 @@ from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.modules.tech_detect import TechDetectModule
 from wotd.modules.vhost_enum import VhostEnumModule
+from wotd.modules.visual_surface import VisualSurfaceModule
 from wotd.modules.web_profile import WebProfileModule
 from wotd.notify import (
     NewHost,
@@ -48,6 +49,7 @@ from wotd.store import (
     JsFileRow,
     JsSecretRow,
     ServiceFingerprintRow,
+    ServiceScreenshotRow,
     SubdomainCandidateRow,
     SubdomainRow,
     TechDetectionRow,
@@ -73,6 +75,7 @@ from wotd.store import (
     list_js_files,
     list_js_secrets,
     list_service_fingerprints,
+    list_service_screenshots,
     list_subdomain_candidates,
     list_subdomains,
     list_tech_detections,
@@ -103,6 +106,8 @@ app = typer.Typer(
     add_completion=False,
     rich_markup_mode="markdown",
 )
+
+
 console = Console()
 
 
@@ -1816,7 +1821,8 @@ async def _run_api_discover(
                         if total_graphql_endpoints:
                             gql_introspect = sum(1 for r in gql_rows if r.introspection_enabled)
                             parts.append(
-                                f"{total_graphql_endpoints} GraphQL endpoints ({gql_introspect} introspectable)"
+                                f"{total_graphql_endpoints} GraphQL endpoints "
+                                f"({gql_introspect} introspectable)"
                             )
                         if total_specs:
                             parts.append(f"{total_specs} specs")
@@ -1906,7 +1912,10 @@ async def _run_web_profile(target_name: str, notify: bool = False) -> None:
                 profile_changes = result.stats.get("profile_changes", 0)
 
                 if posture_findings > 0 or profile_changes > 0:
-                    message = f"[wotd] {target_name} web-profile — {posture_findings} posture findings, {profile_changes} metadata changes"
+                    message = (
+                        f"[wotd] {target_name} web-profile — {posture_findings} posture findings, "
+                        f"{profile_changes} metadata changes"
+                    )
                     sent = await dispatch(message)
                     if sent:
                         console.print("[dim]notification sent[/dim]")
@@ -1914,7 +1923,78 @@ async def _run_web_profile(target_name: str, notify: bool = False) -> None:
         except Exception as e:
             await finish_scan_run(session, scan_run, status="failed", summary={"error": str(e)})
             console.print(f"[red]error[/red]: {e}")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from e
+
+
+@app.command("visual-surface")
+def visual_surface(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+    phash_threshold: int = typer.Option(
+        10,
+        "--phash-threshold",
+        min=0,
+        max=64,
+        help="Hamming distance threshold for treating screenshots as visually different.",
+    ),
+) -> None:
+    """Capture screenshots for live services and track visual drift."""
+    asyncio.run(_run_visual_surface(target, notify, phash_threshold))
+
+
+async def _run_visual_surface(
+    target_name: str,
+    notify: bool = False,
+    phash_threshold: int = 10,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, VisualSurfaceModule.name)
+        scan_run = await start_scan_run(session, target.id, VisualSurfaceModule.name)
+        module = VisualSurfaceModule(
+            session,
+            target,
+            scope,
+            phash_distance_threshold=phash_threshold,
+        )
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=_meta(result.stats))
+            console.print(f"[green]{VisualSurfaceModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new_services_screenshoted", 0)
+    visual_changes = result.stats.get("visual_changes_detected", 0)
+    sample_urls = (result.stats.get("changed_urls") or result.stats.get("new_urls") or [])[:8]
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and (new_count or visual_changes):
+        message = (
+            f"[wotd] {target_name} visual-surface — "
+            f"{new_count} new screenshots, {visual_changes} visual changes"
+        )
+        if sample_urls:
+            message += "\n\n" + "\n".join(sample_urls)
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
 
 
 def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
@@ -2947,6 +3027,124 @@ def show_service_fingerprints(
     asyncio.run(_show_service_fingerprints(target, url, since_td, effective_limit, as_json))
 
 
+def _render_service_screenshots_table(rows: list[ServiceScreenshotRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("host", overflow="fold")
+    table.add_column("url", overflow="fold")
+    table.add_column("phash", style="dim", overflow="fold")
+    table.add_column("size", style="dim")
+    table.add_column("first seen", style="dim")
+    table.add_column("last seen", style="dim")
+    for row in rows:
+        table.add_row(
+            row.host,
+            row.url,
+            row.phash[:16] + "…" if len(row.phash) > 16 else row.phash,
+            f"{row.width}x{row.height}",
+            row.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+            row.last_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_service_screenshots(
+    target_name: str | None,
+    host: str | None,
+    url: str | None,
+    changed_since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_service_screenshots(
+            session,
+            target_id=target_id,
+            host=host,
+            url=url,
+            since=changed_since,
+            limit=limit,
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "host": row.host,
+                        "url": row.url,
+                        "screenshot_path": row.screenshot_path,
+                        "phash": row.phash,
+                        "width": row.width,
+                        "height": row.height,
+                        "first_seen_at": row.first_seen_at.isoformat(),
+                        "last_seen_at": row.last_seen_at.isoformat(),
+                    }
+                    for row in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no service screenshots found[/yellow]")
+        return
+
+    console.print(_render_service_screenshots_table(rows))
+    console.print(f"[dim]{len(rows)} screenshot(s)[/dim]")
+
+
+@show_app.command("service-screenshots")
+def show_service_screenshots(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact service URL."),
+    changed_since: str | None = typer.Option(
+        None,
+        "--changed-since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List service screenshots and visual fingerprints."""
+    if all_rows:
+        changed_since_td: timedelta | None = None
+        effective_limit: int | None = None
+    else:
+        effective_limit = None if limit == 0 else limit
+        changed_since_td = None
+        if changed_since:
+            try:
+                changed_since_td = parse_duration(changed_since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+
+    asyncio.run(
+        _show_service_screenshots(
+            target_name=target,
+            host=host,
+            url=url,
+            changed_since=changed_since_td,
+            limit=effective_limit,
+            as_json=as_json,
+        )
+    )
+
+
 _EXAMPLES = """\
 [bold]Subdomain enumeration[/bold]
   wotd subdomains acme.com               full pipeline (passive → active → resolve → probe)
@@ -3020,6 +3218,15 @@ _EXAMPLES = """\
   wotd show tech-detections acme.com --all      every row, no limit
   wotd show tech-detections acme.com --tech PHP filter by tech name
   wotd show tech-detections acme.com --json     raw json output
+
+[bold]Visual surface[/bold]
+  wotd visual-surface acme.com                  capture screenshots for live HTTP services
+  wotd visual-surface acme.com --phash-threshold 12  tune visual drift sensitivity
+  wotd visual-surface acme.com --notify         also dispatch notification on visual changes
+  wotd show service-screenshots acme.com        latest screenshot rows
+  wotd show service-screenshots acme.com --host app.acme.com  filter by host
+  wotd show service-screenshots acme.com --changed-since 24h  only recent screenshot rows
+  wotd show service-screenshots acme.com --json raw json output
 
 [bold]JS file discovery[/bold]
   wotd discover-js https://acme.com            collect JS files from endpoints + subjs

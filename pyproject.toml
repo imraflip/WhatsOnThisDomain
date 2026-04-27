@@ -16,6 +16,7 @@ dependencies = [
     "aiodns>=3",
     "pydantic>=2",
     "platformdirs>=4",
+    "pillow>=12.2.0",
 ]
 
 [build-system]
@@ -50,6 +51,9 @@ select = [
     "UP",   # pyupgrade
     "RUF",  # ruff-specific
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"wotd/cli.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

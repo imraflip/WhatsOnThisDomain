@@ -419,6 +419,28 @@ class WebProfile(Base):
     )
 
 
+class ServiceScreenshot(Base):
+    __tablename__ = "service_screenshots"
+    __table_args__ = (UniqueConstraint("target_id", "url", "phash", name="uq_service_screenshot"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    screenshot_path: Mapped[str] = mapped_column(Text, nullable=False)
+    phash: Mapped[str] = mapped_column(Text, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class ServiceFingerprint(Base):
     __tablename__ = "service_fingerprints"
     __table_args__ = (UniqueConstraint("target_id", "url", name="uq_service_fingerprint_url"),)

@@ -25,6 +25,7 @@ from wotd.models import (
     JsSecret,
     ScanRun,
     ServiceFingerprint,
+    ServiceScreenshot,
     Subdomain,
     SubdomainCandidate,
     Target,
@@ -167,6 +168,18 @@ class VhostServiceRow:
     status_code: int | None
     title: str | None
     content_length: int | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class ServiceScreenshotRow:
+    host: str
+    url: str
+    screenshot_path: str
+    phash: str
+    width: int
+    height: int
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -1947,7 +1960,8 @@ async def list_endpoint_deltas(
 
     Rows ordered by observed_at desc (most recent first).
 
-    kind filter values: status_changed, content_type_changed, title_changed, body_hash_changed, unreachable
+    kind filter values: status_changed, content_type_changed, title_changed,
+    body_hash_changed, unreachable
     """
     # Subquery to find prior snapshot for each URL
     p = aliased(EndpointSnapshot)
@@ -2079,7 +2093,9 @@ async def upsert_web_profiles(
     target_id: int,
     profiles: list[dict[str, Any]],
 ) -> int:
-    """Upsert web profiles for a target. New rows set first_seen_at, existing refresh last_seen_at."""
+    """Upsert web profiles for a target.
+    New rows set first_seen_at, existing refresh last_seen_at.
+    """
     if not profiles:
         return 0
 
@@ -2133,7 +2149,9 @@ async def upsert_service_fingerprints(
     target_id: int,
     fingerprints: list[dict[str, Any]],
 ) -> int:
-    """Upsert service fingerprints for a target. New rows set first_seen_at, existing refresh last_seen_at."""
+    """Upsert service fingerprints for a target.
+    New rows set first_seen_at, existing refresh last_seen_at.
+    """
     if not fingerprints:
         return 0
 
@@ -2251,4 +2269,137 @@ async def list_service_fingerprints(
             last_seen_at=r.last_seen_at,
         )
         for r in rows
+    ]
+
+
+async def upsert_service_screenshots(
+    session: AsyncSession,
+    target_id: int,
+    screenshots: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Upsert service screenshots keyed by target, url, and phash."""
+    if not screenshots:
+        return (0, 0)
+
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for shot in screenshots:
+        url = str(shot["url"])
+        phash = str(shot["phash"])
+        key = (url, phash)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(shot)
+
+    urls = [str(shot["url"]) for shot in unique]
+    existing: dict[tuple[str, str], ServiceScreenshot] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(ServiceScreenshot).where(
+                ServiceScreenshot.target_id == target_id,
+                ServiceScreenshot.url.in_(chunk),
+            )
+        )
+        for row in result.scalars().all():
+            existing[(row.url, row.phash)] = row
+
+    now = datetime.now(UTC)
+    new_count = 0
+    existing_count = 0
+    for shot in unique:
+        url = str(shot["url"])
+        phash = str(shot["phash"])
+        row = existing.get((url, phash))
+        if row is None:
+            session.add(
+                ServiceScreenshot(
+                    target_id=target_id,
+                    host=str(shot["host"]),
+                    url=url,
+                    screenshot_path=str(shot["screenshot_path"]),
+                    phash=phash,
+                    width=int(shot["width"]),
+                    height=int(shot["height"]),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+        else:
+            row.host = str(shot["host"])
+            row.screenshot_path = str(shot["screenshot_path"])
+            row.width = int(shot["width"])
+            row.height = int(shot["height"])
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (new_count, existing_count)
+
+
+async def get_latest_service_screenshot(
+    session: AsyncSession,
+    target_id: int,
+    url: str,
+) -> ServiceScreenshotRow | None:
+    stmt = (
+        select(ServiceScreenshot)
+        .where(ServiceScreenshot.target_id == target_id, ServiceScreenshot.url == url)
+        .order_by(ServiceScreenshot.last_seen_at.desc(), ServiceScreenshot.first_seen_at.desc())
+        .limit(1)
+    )
+    row = await session.scalar(stmt)
+    if row is None:
+        return None
+    return ServiceScreenshotRow(
+        host=row.host,
+        url=row.url,
+        screenshot_path=row.screenshot_path,
+        phash=row.phash,
+        width=row.width,
+        height=row.height,
+        first_seen_at=row.first_seen_at,
+        last_seen_at=row.last_seen_at,
+    )
+
+
+async def list_service_screenshots(
+    session: AsyncSession,
+    target_id: int | None = None,
+    url: str | None = None,
+    host: str | None = None,
+    since: timedelta | None = None,
+    limit: int | None = None,
+) -> list[ServiceScreenshotRow]:
+    stmt = select(ServiceScreenshot).order_by(
+        ServiceScreenshot.last_seen_at.desc(),
+        ServiceScreenshot.first_seen_at.desc(),
+    )
+
+    if target_id is not None:
+        stmt = stmt.where(ServiceScreenshot.target_id == target_id)
+    if url is not None:
+        stmt = stmt.where(ServiceScreenshot.url == url)
+    if host is not None:
+        stmt = stmt.where(ServiceScreenshot.host == host)
+    if since is not None:
+        stmt = stmt.where(ServiceScreenshot.first_seen_at >= datetime.now(UTC) - since)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    rows = await session.scalars(stmt)
+    return [
+        ServiceScreenshotRow(
+            host=row.host,
+            url=row.url,
+            screenshot_path=row.screenshot_path,
+            phash=row.phash,
+            width=row.width,
+            height=row.height,
+            first_seen_at=row.first_seen_at,
+            last_seen_at=row.last_seen_at,
+        )
+        for row in rows
     ]
