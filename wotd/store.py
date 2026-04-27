@@ -26,6 +26,7 @@ from wotd.models import (
     ScanRun,
     ServiceFingerprint,
     Subdomain,
+    SubdomainCandidate,
     Target,
     TechDetection,
     VhostService,
@@ -101,6 +102,16 @@ class SubdomainRow:
     status_code: int | None
     title: str | None
     url: str | None
+
+
+@dataclass
+class SubdomainCandidateRow:
+    fqdn: str
+    source: str
+    generator: str
+    status: str
+    generated_at: datetime
+    resolved_at: datetime | None
 
 
 @dataclass
@@ -323,6 +334,170 @@ async def get_subdomain_hosts(session: AsyncSession, target_id: int) -> list[str
     """Return every known subdomain host for a target."""
     result = await session.execute(select(Subdomain.host).where(Subdomain.target_id == target_id))
     return [row[0] for row in result.all()]
+
+
+async def upsert_subdomain_candidates(
+    session: AsyncSession,
+    target_id: int,
+    candidates: list[dict[str, str]],
+) -> tuple[int, int, list[str]]:
+    """Insert new subdomain candidates, preserving existing statuses for resume support."""
+    if not candidates:
+        return (0, 0, [])
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, str]] = []
+    for candidate in candidates:
+        key = (candidate["fqdn"], candidate["generator"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+
+    fqdns = [candidate["fqdn"] for candidate in unique]
+    existing: dict[tuple[str, str], SubdomainCandidate] = {}
+    for i in range(0, len(fqdns), _SQLITE_MAX_VARS):
+        chunk = fqdns[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(SubdomainCandidate).where(
+                SubdomainCandidate.target_id == target_id,
+                SubdomainCandidate.fqdn.in_(chunk),
+            )
+        )
+        for row in result.scalars().all():
+            existing[(row.fqdn, row.generator)] = row
+
+    now = datetime.now(UTC)
+    new_fqdns: list[str] = []
+    for candidate in unique:
+        key = (candidate["fqdn"], candidate["generator"])
+        row = existing.get(key)
+        if row is None:
+            session.add(
+                SubdomainCandidate(
+                    target_id=target_id,
+                    fqdn=candidate["fqdn"],
+                    source=candidate["source"],
+                    generator=candidate["generator"],
+                    status=candidate["status"],
+                    generated_at=now,
+                    resolved_at=None,
+                )
+            )
+            new_fqdns.append(candidate["fqdn"])
+        else:
+            row.source = candidate["source"]
+
+    await session.commit()
+    return (len(new_fqdns), len(existing), new_fqdns)
+
+
+async def list_subdomain_candidates(
+    session: AsyncSession,
+    target_id: int | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    generator: str | None = None,
+    since: timedelta | None = None,
+    limit: int | None = 25,
+) -> list[SubdomainCandidateRow]:
+    stmt = select(
+        SubdomainCandidate.fqdn,
+        SubdomainCandidate.source,
+        SubdomainCandidate.generator,
+        SubdomainCandidate.status,
+        SubdomainCandidate.generated_at,
+        SubdomainCandidate.resolved_at,
+    ).order_by(SubdomainCandidate.generated_at.desc())
+
+    if target_id is not None:
+        stmt = stmt.where(SubdomainCandidate.target_id == target_id)
+    if status is not None:
+        stmt = stmt.where(SubdomainCandidate.status == status)
+    if source is not None:
+        stmt = stmt.where(SubdomainCandidate.source == source)
+    if generator is not None:
+        stmt = stmt.where(SubdomainCandidate.generator == generator)
+    if since is not None:
+        stmt = stmt.where(SubdomainCandidate.generated_at >= datetime.now(UTC) - since)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    return [
+        SubdomainCandidateRow(
+            fqdn=row[0],
+            source=row[1],
+            generator=row[2],
+            status=row[3],
+            generated_at=row[4],
+            resolved_at=row[5],
+        )
+        for row in result.all()
+    ]
+
+
+async def get_pending_subdomain_candidates(
+    session: AsyncSession,
+    target_id: int,
+    generator: str,
+    limit: int,
+) -> list[str]:
+    stmt = (
+        select(SubdomainCandidate.fqdn)
+        .where(
+            SubdomainCandidate.target_id == target_id,
+            SubdomainCandidate.generator == generator,
+            SubdomainCandidate.status == "generated",
+        )
+        .order_by(SubdomainCandidate.generated_at.asc(), SubdomainCandidate.fqdn.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [row[0] for row in result.all()]
+
+
+async def count_pending_subdomain_candidates(
+    session: AsyncSession,
+    target_id: int,
+    generator: str,
+) -> int:
+    stmt = select(SubdomainCandidate.id).where(
+        SubdomainCandidate.target_id == target_id,
+        SubdomainCandidate.generator == generator,
+        SubdomainCandidate.status == "generated",
+    )
+    result = await session.execute(stmt)
+    return len(result.all())
+
+
+async def update_subdomain_candidate_statuses(
+    session: AsyncSession,
+    target_id: int,
+    generator: str,
+    fqdns: list[str],
+    status: str,
+    resolved_at: datetime | None = None,
+) -> int:
+    if not fqdns:
+        return 0
+
+    updated = 0
+    for i in range(0, len(fqdns), _SQLITE_MAX_VARS):
+        chunk = fqdns[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(SubdomainCandidate).where(
+                SubdomainCandidate.target_id == target_id,
+                SubdomainCandidate.generator == generator,
+                SubdomainCandidate.fqdn.in_(chunk),
+            )
+        )
+        for row in result.scalars().all():
+            row.status = status
+            row.resolved_at = resolved_at
+            updated += 1
+
+    await session.commit()
+    return updated
 
 
 async def upsert_dns_records(

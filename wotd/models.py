@@ -63,6 +63,24 @@ class Subdomain(Base):
     )
 
 
+class SubdomainCandidate(Base):
+    __tablename__ = "subdomain_candidates"
+    __table_args__ = (
+        UniqueConstraint("target_id", "fqdn", "generator", name="uq_subdomain_candidate"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    fqdn: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    generator: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class HttpService(Base):
     __tablename__ = "http_services"
     __table_args__ = (UniqueConstraint("target_id", "url", name="uq_http_service_url"),)
