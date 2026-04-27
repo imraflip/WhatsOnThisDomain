@@ -28,6 +28,7 @@ from wotd.models import (
     Subdomain,
     Target,
     TechDetection,
+    VhostService,
     WebProfile,
 )
 
@@ -143,6 +144,18 @@ class ServiceFingerprintRow:
     favicon_hash: str | None
     body_hash: str | None
     title_hash: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class VhostServiceRow:
+    base_url: str
+    vhost: str
+    url: str
+    status_code: int | None
+    title: str | None
+    content_length: int | None
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -638,9 +651,7 @@ async def upsert_js_files(
 
 async def get_js_file_urls(session: AsyncSession, target_id: int) -> list[str]:
     """Return all JS file URLs stored for this target."""
-    result = await session.execute(
-        select(JsFile.url).where(JsFile.target_id == target_id)
-    )
+    result = await session.execute(select(JsFile.url).where(JsFile.target_id == target_id))
     return [row[0] for row in result.all()]
 
 
@@ -748,12 +759,8 @@ async def upsert_js_secrets(
         return (0, 0)
 
     keys = [(str(s["source_js_url"]), str(s["kind"]), str(s["data"])) for s in secrets]
-    result = await session.execute(
-        select(JsSecret).where(JsSecret.target_id == target_id)
-    )
-    existing = {
-        (r.source_js_url, r.kind, r.data): r for r in result.scalars().all()
-    }
+    result = await session.execute(select(JsSecret).where(JsSecret.target_id == target_id))
+    existing = {(r.source_js_url, r.kind, r.data): r for r in result.scalars().all()}
 
     now = datetime.now(UTC)
     new_count = 0
@@ -1071,9 +1078,7 @@ async def upsert_dir_results(
         else:
             row = (
                 await session.execute(
-                    select(DirResult).where(
-                        DirResult.target_id == target_id, DirResult.url == url
-                    )
+                    select(DirResult).where(DirResult.target_id == target_id, DirResult.url == url)
                 )
             ).scalar_one()
             if row.status_code != new_status:
@@ -1084,6 +1089,111 @@ async def upsert_dir_results(
 
     await session.commit()
     return new_count, existing_count, new_urls, changed_urls
+
+
+async def upsert_vhost_services(
+    session: AsyncSession,
+    target_id: int,
+    services: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Upsert vhost_service rows. Returns (new_count, existing_count, new_urls)."""
+    if not services:
+        return (0, 0, [])
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for svc in services:
+        key = (str(svc["base_url"]), str(svc["vhost"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(svc)
+
+    existing = await session.execute(
+        select(VhostService).where(VhostService.target_id == target_id)
+    )
+    by_key = {(row.base_url, row.vhost): row for row in existing.scalars().all()}
+
+    now = datetime.now(UTC)
+    new_urls: list[str] = []
+    existing_count = 0
+    for svc in unique:
+        base_url = str(svc["base_url"])
+        vhost = str(svc["vhost"])
+        row = by_key.get((base_url, vhost))
+        if row is None:
+            session.add(
+                VhostService(
+                    target_id=target_id,
+                    base_url=base_url,
+                    vhost=vhost,
+                    url=str(svc["url"]),
+                    status_code=svc.get("status_code"),
+                    title=svc.get("title"),
+                    content_length=svc.get("content_length"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_urls.append(str(svc["url"]))
+        else:
+            row.url = str(svc["url"])
+            row.status_code = svc.get("status_code")
+            row.title = svc.get("title")
+            row.content_length = svc.get("content_length")
+            row.last_seen_at = now
+            existing_count += 1
+
+    await session.commit()
+    return (len(new_urls), existing_count, new_urls)
+
+
+async def list_vhost_services(
+    session: AsyncSession,
+    target_id: int | None = None,
+    base_url: str | None = None,
+    vhost: str | None = None,
+    status_code: int | None = None,
+    since: timedelta | None = None,
+    limit: int | None = 25,
+) -> list[VhostServiceRow]:
+    stmt = select(
+        VhostService.base_url,
+        VhostService.vhost,
+        VhostService.url,
+        VhostService.status_code,
+        VhostService.title,
+        VhostService.content_length,
+        VhostService.first_seen_at,
+        VhostService.last_seen_at,
+    ).order_by(VhostService.first_seen_at.desc())
+
+    if target_id is not None:
+        stmt = stmt.where(VhostService.target_id == target_id)
+    if base_url is not None:
+        stmt = stmt.where(VhostService.base_url == base_url)
+    if vhost is not None:
+        stmt = stmt.where(VhostService.vhost == vhost)
+    if status_code is not None:
+        stmt = stmt.where(VhostService.status_code == status_code)
+    if since is not None:
+        stmt = stmt.where(VhostService.first_seen_at >= datetime.now(UTC) - since)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    return [
+        VhostServiceRow(
+            base_url=r[0],
+            vhost=r[1],
+            url=r[2],
+            status_code=r[3],
+            title=r[4],
+            content_length=r[5],
+            first_seen_at=r[6],
+            last_seen_at=r[7],
+        )
+        for r in result.all()
+    ]
 
 
 @dataclass
@@ -1659,14 +1769,14 @@ async def list_endpoint_deltas(
     limit: int | None = 25,
 ) -> list[EndpointDeltaRow]:
     """Query endpoint deltas. Each row represents one changed field for one URL from one probe.
-    
+
     Rows ordered by observed_at desc (most recent first).
-    
+
     kind filter values: status_changed, content_type_changed, title_changed, body_hash_changed, unreachable
     """
     # Subquery to find prior snapshot for each URL
     p = aliased(EndpointSnapshot)
-    
+
     stmt = select(
         EndpointSnapshot.url,
         EndpointSnapshot.status_code,
@@ -1679,7 +1789,7 @@ async def list_endpoint_deltas(
         p.body_hash,
         p.title,
     ).select_from(EndpointSnapshot)
-    
+
     # Left join to previous snapshot (ordered by observed_at, take the one just before current)
     stmt = stmt.outerjoin(
         p,
@@ -1687,7 +1797,7 @@ async def list_endpoint_deltas(
         & (p.url == EndpointSnapshot.url)
         & (p.observed_at < EndpointSnapshot.observed_at),
     )
-    
+
     if target_id is not None:
         stmt = stmt.where(EndpointSnapshot.target_id == target_id)
     if url is not None:
@@ -1695,14 +1805,14 @@ async def list_endpoint_deltas(
     if since is not None:
         cutoff = datetime.now(UTC) - since
         stmt = stmt.where(EndpointSnapshot.observed_at >= cutoff)
-    
+
     stmt = stmt.order_by(EndpointSnapshot.observed_at.desc())
     if limit is not None:
         stmt = stmt.limit(limit)
-    
+
     result = await session.execute(stmt)
     rows: list[EndpointDeltaRow] = []
-    
+
     for row in result.all():
         current_url = row[0]
         current_status = row[1]
@@ -1714,12 +1824,17 @@ async def list_endpoint_deltas(
         prior_content_type = row[7]
         prior_body_hash = row[8]
         prior_title = row[9]
-        
+
         # If no prior snapshot, can't determine change type
-        if prior_status is None and prior_content_type is None and prior_body_hash is None and prior_title is None:
+        if (
+            prior_status is None
+            and prior_content_type is None
+            and prior_body_hash is None
+            and prior_title is None
+        ):
             # This is the first snapshot or all priors are null
             continue
-        
+
         # Classify changes
         if current_status is None and prior_status is not None:
             rows.append(
@@ -1741,8 +1856,10 @@ async def list_endpoint_deltas(
                     observed_at=observed_at,
                 )
             )
-        
-        if current_content_type != prior_content_type and (kind is None or kind == "content_type_changed"):
+
+        if current_content_type != prior_content_type and (
+            kind is None or kind == "content_type_changed"
+        ):
             rows.append(
                 EndpointDeltaRow(
                     url=current_url,
@@ -1752,7 +1869,7 @@ async def list_endpoint_deltas(
                     observed_at=observed_at,
                 )
             )
-        
+
         if current_title != prior_title and (kind is None or kind == "title_changed"):
             rows.append(
                 EndpointDeltaRow(
@@ -1763,7 +1880,7 @@ async def list_endpoint_deltas(
                     observed_at=observed_at,
                 )
             )
-        
+
         if current_body_hash != prior_body_hash and (kind is None or kind == "body_hash_changed"):
             rows.append(
                 EndpointDeltaRow(
@@ -1774,11 +1891,11 @@ async def list_endpoint_deltas(
                     observed_at=observed_at,
                 )
             )
-    
+
     # Filter by kind if requested
     if kind is not None:
         rows = [r for r in rows if r.kind == kind]
-    
+
     return rows
 
 
@@ -1960,4 +2077,3 @@ async def list_service_fingerprints(
         )
         for r in rows
     ]
-
