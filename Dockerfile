@@ -25,6 +25,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install recon tools used by current milestones
 RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
     && go install github.com/tomnomnom/assetfinder@latest \
+    && go install github.com/projectdiscovery/alterx/cmd/alterx@latest \
     && go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest \
     && go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
     && go install github.com/projectdiscovery/httpx/cmd/httpx@latest \

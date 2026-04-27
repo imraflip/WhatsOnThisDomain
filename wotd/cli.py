@@ -21,6 +21,7 @@ from wotd.modules.base import ModuleResult
 from wotd.modules.crawl import CrawlModule
 from wotd.modules.subdomains_active import SubdomainsActiveModule
 from wotd.modules.subdomains_passive import SubdomainsPassiveModule
+from wotd.modules.subdomains_permute import SubdomainsPermuteModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.modules.tech_detect import TechDetectModule
@@ -47,6 +48,7 @@ from wotd.store import (
     JsFileRow,
     JsSecretRow,
     ServiceFingerprintRow,
+    SubdomainCandidateRow,
     SubdomainRow,
     TechDetectionRow,
     VhostServiceRow,
@@ -71,6 +73,7 @@ from wotd.store import (
     list_js_files,
     list_js_secrets,
     list_service_fingerprints,
+    list_subdomain_candidates,
     list_subdomains,
     list_tech_detections,
     list_vhost_services,
@@ -269,6 +272,96 @@ def subdomains(
     asyncio.run(_run_subdomains(target, notify))
 
 
+async def _run_subdomains_permute(
+    target_name: str,
+    mode: str,
+    max_candidates: int,
+    budget_minutes: int,
+    notify: bool = False,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            console.print(
+                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
+            )
+            raise typer.Exit(code=1)
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, SubdomainsPermuteModule.name)
+        scan_run = await start_scan_run(session, target.id, SubdomainsPermuteModule.name)
+        module = SubdomainsPermuteModule(
+            session,
+            target,
+            scope,
+            mode=mode,
+            max_candidates=max_candidates,
+            budget_minutes=budget_minutes,
+        )
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{SubdomainsPermuteModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    new_hosts: list[str] = result.stats.get("new_hosts", [])
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = (
+            f"[wotd] {target_name} subdomains-permute — "
+            f"{new_count} new resolved permuted subdomain(s)"
+        )
+        if new_hosts:
+            message += "\n\n" + "\n".join(new_hosts[:8])
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+@app.command("subdomains-permute")
+def subdomains_permute(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    mode: str = typer.Option(
+        "balanced",
+        "--mode",
+        help="Permutation profile: quick, balanced, or deep.",
+    ),
+    max_candidates: int = typer.Option(
+        20000,
+        "--max-candidates",
+        min=1,
+        help="Maximum unique generated candidates to process per run.",
+    ),
+    budget_minutes: int = typer.Option(
+        30,
+        "--budget-minutes",
+        min=1,
+        help="Time budget for generation and chunked resolution work.",
+    ),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the permutation run finishes."
+    ),
+) -> None:
+    """Generate and resolve mutated subdomains from known target hosts."""
+    if mode not in {"quick", "balanced", "deep"}:
+        console.print("[red]error:[/red] --mode must be one of: quick, balanced, deep")
+        raise typer.Exit(code=2)
+    asyncio.run(_run_subdomains_permute(target, mode, max_candidates, budget_minutes, notify))
+
+
 async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
     await init_db()
     session_factory = get_session_factory()
@@ -403,6 +496,123 @@ def show_interesting_subdomains(
     """List subdomains flagged by gf pattern matching."""
     effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_interesting_subdomains(target, pattern, effective_limit, as_json))
+
+
+def _render_subdomain_candidates_table(rows: list[SubdomainCandidateRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("fqdn", overflow="fold")
+    table.add_column("source", style="dim")
+    table.add_column("generator", style="dim")
+    table.add_column("status", style="bold yellow")
+    table.add_column("generated", style="dim")
+    table.add_column("resolved", style="dim")
+    for row in rows:
+        table.add_row(
+            row.fqdn,
+            row.source,
+            row.generator,
+            row.status,
+            row.generated_at.strftime("%Y-%m-%d %H:%M"),
+            row.resolved_at.strftime("%Y-%m-%d %H:%M") if row.resolved_at else "-",
+        )
+    return table
+
+
+async def _show_subdomain_candidates(
+    target_name: str | None,
+    status: str | None,
+    source: str | None,
+    since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+
+        rows = await list_subdomain_candidates(
+            session,
+            target_id=target_id,
+            status=status,
+            source=source,
+            since=since,
+            limit=limit,
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "fqdn": row.fqdn,
+                        "source": row.source,
+                        "generator": row.generator,
+                        "status": row.status,
+                        "generated_at": row.generated_at.isoformat(),
+                        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+                    }
+                    for row in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no subdomain candidates found[/yellow]")
+        return
+
+    console.print(_render_subdomain_candidates_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("subdomain-candidates")
+def show_subdomain_candidates(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    status: str | None = typer.Option(
+        None, "--status", help="Filter by candidate status (generated, resolved, unresolved)."
+    ),
+    source: str | None = typer.Option(None, "--source", help="Filter by source (e.g. alterx)."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows generated within this window (e.g. 24h, 7d)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List generated permutation candidates and their resolution status."""
+    if all_rows:
+        effective_limit: int | None = None
+        since_td: timedelta | None = None
+    else:
+        effective_limit = None if limit == 0 else limit
+        since_td = None
+        if since:
+            try:
+                since_td = parse_duration(since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+
+    asyncio.run(
+        _show_subdomain_candidates(
+            target_name=target,
+            status=status,
+            source=source,
+            since=since_td,
+            limit=effective_limit,
+            as_json=as_json,
+        )
+    )
 
 
 def _render_table(rows: list[SubdomainRow]) -> Table:
@@ -1257,8 +1467,7 @@ async def _run_vhost_enum_target(
         target = await get_target_by_name(session, target_name)
         if target is None:
             console.print(
-                f"[red]error:[/red] target {target_name!r} not found — "
-                "run wotd subdomains first"
+                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
             )
             raise typer.Exit(code=1)
 
@@ -1929,9 +2138,7 @@ def show_vhosts(
                 raise typer.Exit(code=2) from e
         effective_limit = None if limit == 0 else limit
 
-    asyncio.run(
-        _show_vhosts(target, base_url, host, status, since_td, effective_limit, as_json)
-    )
+    asyncio.run(_show_vhosts(target, base_url, host, status, since_td, effective_limit, as_json))
 
 
 def _render_js_files_table(rows: list[JsFileRow]) -> Table:
@@ -2781,6 +2988,18 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --wordlist tech_php  filter by wordlist pass
   wotd show dir-results acme.com --since 24h  found in the last day
   wotd show dir-results acme.com --json      raw json output
+
+[bold]Subdomain permutation[/bold]
+  wotd subdomains-permute acme.com                  generate and resolve target-aware mutations
+  wotd subdomains-permute acme.com --mode quick     run the fast permutation profile
+  wotd subdomains-permute acme.com --mode deep      run the larger enriched profile
+  wotd subdomains-permute acme.com --max-candidates 5000  cap candidate volume
+  wotd subdomains-permute acme.com --budget-minutes 15    cap runtime budget
+  wotd subdomains-permute acme.com --notify         also dispatch notification on new resolved hosts
+  wotd show subdomain-candidates acme.com           latest generated candidates
+  wotd show subdomain-candidates acme.com --status resolved  only resolved candidates
+  wotd show subdomain-candidates acme.com --all     every row, no limit
+  wotd show subdomain-candidates acme.com --json    raw json output
 
 [bold]Virtual host enumeration[/bold]
   wotd vhost-enum acme.com                    probe all known live services with Host fuzzing
