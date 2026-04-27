@@ -227,9 +227,7 @@ class VhostEnumModule(Module):
                     "vhost": vhost,
                     "url": _build_vhost_url(base_url, vhost),
                     "status_code": _int_or_none(entry.get("status")),
-                    "title": entry.get("title")
-                    if isinstance(entry.get("title"), str)
-                    else None,
+                    "title": entry.get("title") if isinstance(entry.get("title"), str) else None,
                     "content_length": _int_or_none(entry.get("length")),
                 }
             )
@@ -304,9 +302,7 @@ class VhostEnumModule(Module):
                         hit_status=hit.get("status_code")
                         if isinstance(hit.get("status_code"), int)
                         else None,
-                        hit_title=hit.get("title")
-                        if isinstance(hit.get("title"), str)
-                        else None,
+                        hit_title=hit.get("title") if isinstance(hit.get("title"), str) else None,
                         hit_content_length=hit.get("content_length")
                         if isinstance(hit.get("content_length"), int)
                         else None,
