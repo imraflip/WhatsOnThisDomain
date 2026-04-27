@@ -10,9 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from wotd.models import (
+    ApiRoute,
+    ApiSpec,
     DirResult,
     DnsRecord,
     Endpoint,
+    GraphqlEndpoint,
     HttpService,
     InterestingEndpoint,
     InterestingSubdomain,
@@ -1193,6 +1196,363 @@ async def list_dir_results(
             first_seen_at=r[3],
             last_seen_at=r[4],
             wordlist=r[5],
+        )
+        for r in result.all()
+    ]
+
+
+@dataclass
+class ApiRouteRow:
+    url: str
+    host: str
+    method: str
+    status_code: int | None
+    content_type: str | None
+    source: str
+    spec_url: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+async def upsert_api_routes(
+    session: AsyncSession,
+    target_id: int,
+    routes: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Upsert api_route rows. Unique on (target_id, url, method).
+
+    Source is preserved on existing rows so the first-discovery source wins;
+    status_code, content_type, and spec_url refresh on each call.
+    Returns (new_count, existing_count, new_keys) where each entry in new_keys
+    is "METHOD url" for the newly inserted row.
+    """
+    if not routes:
+        return (0, 0, [])
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for r in routes:
+        key = (str(r["url"]), str(r["method"]).upper())
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    urls = list({k[0] for k in seen})
+    existing: dict[tuple[str, str], ApiRoute] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(ApiRoute).where(
+                ApiRoute.target_id == target_id,
+                ApiRoute.url.in_(chunk),
+            )
+        )
+        for ar in result.scalars().all():
+            existing[(ar.url, ar.method)] = ar
+
+    now = datetime.now(UTC)
+    new_count = 0
+    new_keys: list[str] = []
+    for r in unique:
+        url = str(r["url"])
+        method = str(r["method"]).upper()
+        row: ApiRoute | None = existing.get((url, method))
+        if row is None:
+            session.add(
+                ApiRoute(
+                    target_id=target_id,
+                    url=url,
+                    host=str(r["host"]),
+                    method=method,
+                    status_code=r.get("status_code"),
+                    content_type=r.get("content_type"),
+                    source=str(r["source"]),
+                    spec_url=r.get("spec_url"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_count += 1
+            new_keys.append(f"{method} {url}")
+        else:
+            row.last_seen_at = now
+            new_status = r.get("status_code")
+            if new_status is not None:
+                row.status_code = int(new_status)
+            new_ct = r.get("content_type")
+            if new_ct is not None:
+                row.content_type = str(new_ct)
+            new_spec_url = r.get("spec_url")
+            if new_spec_url is not None and row.spec_url is None:
+                row.spec_url = str(new_spec_url)
+
+    await session.commit()
+    return (new_count, len(existing), new_keys)
+
+
+async def list_api_routes(
+    session: AsyncSession,
+    target_id: int | None = None,
+    host: str | None = None,
+    method: str | None = None,
+    source: str | None = None,
+    status_code: int | None = None,
+    since: timedelta | None = None,
+    limit: int | None = 25,
+) -> list[ApiRouteRow]:
+    stmt = select(
+        ApiRoute.url,
+        ApiRoute.host,
+        ApiRoute.method,
+        ApiRoute.status_code,
+        ApiRoute.content_type,
+        ApiRoute.source,
+        ApiRoute.spec_url,
+        ApiRoute.first_seen_at,
+        ApiRoute.last_seen_at,
+    ).order_by(ApiRoute.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(ApiRoute.target_id == target_id)
+    if host is not None:
+        stmt = stmt.where(ApiRoute.host == host)
+    if method is not None:
+        stmt = stmt.where(ApiRoute.method == method.upper())
+    if source is not None:
+        stmt = stmt.where(ApiRoute.source == source)
+    if status_code is not None:
+        stmt = stmt.where(ApiRoute.status_code == status_code)
+    if since is not None:
+        stmt = stmt.where(ApiRoute.first_seen_at >= datetime.now(UTC) - since)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        ApiRouteRow(
+            url=r[0],
+            host=r[1],
+            method=r[2],
+            status_code=r[3],
+            content_type=r[4],
+            source=r[5],
+            spec_url=r[6],
+            first_seen_at=r[7],
+            last_seen_at=r[8],
+        )
+        for r in result.all()
+    ]
+
+
+@dataclass
+class GraphqlEndpointRow:
+    url: str
+    host: str
+    introspection_enabled: bool
+    server_type: str | None
+    schema_json: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+async def upsert_graphql_endpoints(
+    session: AsyncSession,
+    target_id: int,
+    endpoints: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Upsert graphql_endpoint rows. Unique on (target_id, url).
+
+    Returns (new_count, existing_count, new_urls).
+    """
+    if not endpoints:
+        return (0, 0, [])
+
+    urls = [str(e["url"]) for e in endpoints]
+    existing: dict[str, GraphqlEndpoint] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(GraphqlEndpoint).where(
+                GraphqlEndpoint.target_id == target_id,
+                GraphqlEndpoint.url.in_(chunk),
+            )
+        )
+        for ge in result.scalars().all():
+            existing[ge.url] = ge
+
+    now = datetime.now(UTC)
+    new_urls: list[str] = []
+    for e in endpoints:
+        url = str(e["url"])
+        row: GraphqlEndpoint | None = existing.get(url)
+        if row is None:
+            session.add(
+                GraphqlEndpoint(
+                    target_id=target_id,
+                    url=url,
+                    host=str(e["host"]),
+                    introspection_enabled=bool(e.get("introspection_enabled", False)),
+                    server_type=e.get("server_type"),
+                    schema_json=e.get("schema_json"),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_urls.append(url)
+        else:
+            row.last_seen_at = now
+            if "introspection_enabled" in e:
+                row.introspection_enabled = bool(e["introspection_enabled"])
+            new_st = e.get("server_type")
+            if new_st is not None:
+                row.server_type = str(new_st)
+            new_sj = e.get("schema_json")
+            if new_sj is not None:
+                row.schema_json = str(new_sj)
+
+    await session.commit()
+    return (len(new_urls), len(existing), new_urls)
+
+
+async def list_graphql_endpoints(
+    session: AsyncSession,
+    target_id: int | None = None,
+    host: str | None = None,
+    limit: int | None = 25,
+) -> list[GraphqlEndpointRow]:
+    stmt = select(
+        GraphqlEndpoint.url,
+        GraphqlEndpoint.host,
+        GraphqlEndpoint.introspection_enabled,
+        GraphqlEndpoint.server_type,
+        GraphqlEndpoint.schema_json,
+        GraphqlEndpoint.first_seen_at,
+        GraphqlEndpoint.last_seen_at,
+    ).order_by(GraphqlEndpoint.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(GraphqlEndpoint.target_id == target_id)
+    if host is not None:
+        stmt = stmt.where(GraphqlEndpoint.host == host)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        GraphqlEndpointRow(
+            url=r[0],
+            host=r[1],
+            introspection_enabled=bool(r[2]),
+            server_type=r[3],
+            schema_json=r[4],
+            first_seen_at=r[5],
+            last_seen_at=r[6],
+        )
+        for r in result.all()
+    ]
+
+
+@dataclass
+class ApiSpecRow:
+    url: str
+    host: str
+    spec_type: str
+    routes_count: int
+    raw_spec: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+async def upsert_api_specs(
+    session: AsyncSession,
+    target_id: int,
+    specs: list[dict[str, Any]],
+) -> tuple[int, int, list[str]]:
+    """Upsert api_spec rows. Unique on (target_id, url).
+
+    Returns (new_count, existing_count, new_urls).
+    """
+    if not specs:
+        return (0, 0, [])
+
+    urls = [str(s["url"]) for s in specs]
+    existing: dict[str, ApiSpec] = {}
+    for i in range(0, len(urls), _SQLITE_MAX_VARS):
+        chunk = urls[i : i + _SQLITE_MAX_VARS]
+        result = await session.execute(
+            select(ApiSpec).where(
+                ApiSpec.target_id == target_id,
+                ApiSpec.url.in_(chunk),
+            )
+        )
+        for sp in result.scalars().all():
+            existing[sp.url] = sp
+
+    now = datetime.now(UTC)
+    new_urls: list[str] = []
+    for s in specs:
+        url = str(s["url"])
+        row: ApiSpec | None = existing.get(url)
+        if row is None:
+            session.add(
+                ApiSpec(
+                    target_id=target_id,
+                    url=url,
+                    host=str(s["host"]),
+                    spec_type=str(s.get("spec_type", "unknown")),
+                    routes_count=int(s.get("routes_count", 0)),
+                    raw_spec=str(s.get("raw_spec", "")),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            new_urls.append(url)
+        else:
+            row.last_seen_at = now
+            new_type = s.get("spec_type")
+            if new_type is not None:
+                row.spec_type = str(new_type)
+            new_count = s.get("routes_count")
+            if new_count is not None:
+                row.routes_count = int(new_count)
+            new_raw = s.get("raw_spec")
+            if new_raw is not None:
+                row.raw_spec = str(new_raw)
+
+    await session.commit()
+    return (len(new_urls), len(existing), new_urls)
+
+
+async def list_api_specs(
+    session: AsyncSession,
+    target_id: int | None = None,
+    host: str | None = None,
+    spec_type: str | None = None,
+    limit: int | None = 25,
+) -> list[ApiSpecRow]:
+    stmt = select(
+        ApiSpec.url,
+        ApiSpec.host,
+        ApiSpec.spec_type,
+        ApiSpec.routes_count,
+        ApiSpec.raw_spec,
+        ApiSpec.first_seen_at,
+        ApiSpec.last_seen_at,
+    ).order_by(ApiSpec.first_seen_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(ApiSpec.target_id == target_id)
+    if host is not None:
+        stmt = stmt.where(ApiSpec.host == host)
+    if spec_type is not None:
+        stmt = stmt.where(ApiSpec.spec_type == spec_type)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [
+        ApiSpecRow(
+            url=r[0],
+            host=r[1],
+            spec_type=r[2],
+            routes_count=r[3],
+            raw_spec=r[4],
+            first_seen_at=r[5],
+            last_seen_at=r[6],
         )
         for r in result.all()
     ]

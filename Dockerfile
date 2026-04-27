@@ -52,6 +52,14 @@ RUN go install github.com/lc/subjs@latest \
 # Directory bruteforcing
 RUN go install github.com/ffuf/ffuf/v2@latest
 
+# API discovery tools
+# kr (kiterunner): method-aware REST API route bruteforcer; .kite corpus replays the right verb
+# sj: BishopFox Swagger Jacker — extracts endpoints from OpenAPI/Swagger specs with $ref support
+# graphw00f: GraphQL implementation fingerprinter (Apollo, Hasura, AWS AppSync, etc.)
+RUN go install github.com/assetnote/kiterunner/cmd/kr@latest \
+    && go install github.com/BishopFox/sj@latest \
+    && pip install --no-cache-dir graphw00f
+
 # gf pattern matching — install binary + community patterns + custom wotd patterns into ~/.gf
 RUN go install github.com/tomnomnom/gf@latest \
     && mkdir -p /root/.gf \
@@ -99,6 +107,7 @@ RUN set -e; \
         "httparchive_subdomains_:httparchive_subdomains_raw.txt" \
         "httparchive_directories_1m_:httparchive_directories.txt" \
         "httparchive_js_2:httparchive_js.txt" \
+        "httparchive_apiroutes_:api_routes.txt" \
         "httparchive_php_:tech_php.txt" \
         "httparchive_aspx_asp_cfm_svc_ashx_asmx_:tech_dotnet.txt" \
         "httparchive_jsp_jspa_do_action_:tech_java.txt" \
@@ -145,6 +154,38 @@ RUN set -e; \
         echo "Downloading ${src} -> ${dest}"; \
         curl -fsSL "${SECLISTS}/${src}" -o "/opt/wotd/wordlists/${dest}"; \
     done
+
+# API discovery wordlists: kiterunner method-aware corpus + curated path lists for
+# GraphQL endpoint discovery, OpenAPI/Swagger spec discovery, and tRPC procedure probing.
+# Path lists are stored without leading slashes since ffuf templates URLs as <url>/FUZZ.
+RUN curl -fsSL https://wordlists.assetnote.io/data/kiterunner/routes-large.kite \
+        -o /opt/wotd/wordlists/routes-large.kite \
+    && printf '%s\n' \
+        graphql api/graphql graphiql query gql playground console explorer \
+        api/v1/graphql api/v2/graphql graph graphql/v1 graphql/v2 \
+        graphql/console api/graphiql graphql-explorer v1/graphql v2/graphql \
+        > /opt/wotd/wordlists/graphql_paths.txt \
+    && printf '%s\n' \
+        swagger.json openapi.json openapi.yaml api-docs api-docs/swagger.json \
+        swagger/v1/swagger.json swagger/v2/swagger.json v2/api-docs v3/api-docs \
+        swagger-ui.html api/swagger.json api/openapi.json api/swagger api/openapi \
+        docs/swagger.json docs/openapi.json spec spec.json spec.yaml api/spec \
+        api/v1/swagger.json api/v2/swagger.json api/v3/openapi.json \
+        .well-known/openapi redoc api-docs/json \
+        > /opt/wotd/wordlists/openapi_paths.txt \
+    && printf '%s\n' \
+        api/trpc/auth.login api/trpc/auth.session api/trpc/user.me \
+        api/trpc/user.list api/trpc/user.get api/trpc/user.update \
+        api/trpc/user.delete api/trpc/post.list api/trpc/post.get \
+        api/trpc/post.create api/trpc/admin.users.list api/trpc/admin.list \
+        api/trpc/health api/trpc/example.hello \
+        trpc/auth.login trpc/auth.session trpc/user.me trpc/users.list \
+        api/trpc/_app.auth.login api/trpc/_app.auth.session api/trpc/_app.user.me \
+        api/trpc/_app.user.list api/trpc/_app.user.get api/trpc/_app.post.list \
+        api/trpc/_app.post.get api/trpc/_app.post.create api/trpc/_app.health \
+        trpc/_app.auth.login trpc/_app.auth.session trpc/_app.user.me \
+        trpc/_app.users.list \
+        > /opt/wotd/wordlists/trpc_paths.txt
 
 WORKDIR /app
 
