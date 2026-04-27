@@ -24,9 +24,11 @@ from wotd.models import (
     JsFile,
     JsSecret,
     ScanRun,
+    ServiceFingerprint,
     Subdomain,
     Target,
     TechDetection,
+    WebProfile,
 )
 
 
@@ -117,6 +119,32 @@ class EndpointDeltaRow:
     old_value: str | None
     new_value: str | None
     observed_at: datetime
+
+
+@dataclass
+class WebProfileRow:
+    url: str
+    status_code: int | None
+    title: str | None
+    server: str | None
+    csp: str | None
+    hsts: str | None
+    cors: str | None
+    set_cookie_raw: str | None
+    cookie_flags_json: str | None
+    headers_json: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass
+class ServiceFingerprintRow:
+    url: str
+    favicon_hash: str | None
+    body_hash: str | None
+    title_hash: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
 
 
 async def list_subdomains(
@@ -1752,4 +1780,184 @@ async def list_endpoint_deltas(
         rows = [r for r in rows if r.kind == kind]
     
     return rows
+
+
+async def upsert_web_profiles(
+    session: AsyncSession,
+    target_id: int,
+    profiles: list[dict[str, Any]],
+) -> int:
+    """Upsert web profiles for a target. New rows set first_seen_at, existing refresh last_seen_at."""
+    if not profiles:
+        return 0
+
+    count = 0
+    for profile in profiles:
+        url = profile.get("url")
+        if not url:
+            continue
+
+        stmt = select(WebProfile).where(
+            (WebProfile.target_id == target_id) & (WebProfile.url == url)
+        )
+        existing = await session.scalar(stmt)
+
+        if existing:
+            existing.status_code = profile.get("status_code")
+            existing.title = profile.get("title")
+            existing.server = profile.get("server")
+            existing.csp = profile.get("csp")
+            existing.hsts = profile.get("hsts")
+            existing.cors = profile.get("cors")
+            existing.set_cookie_raw = profile.get("set_cookie_raw")
+            existing.cookie_flags_json = profile.get("cookie_flags_json")
+            existing.headers_json = profile.get("headers_json")
+            existing.last_seen_at = datetime.now(UTC)
+            await session.merge(existing)
+        else:
+            new_profile = WebProfile(
+                target_id=target_id,
+                url=url,
+                status_code=profile.get("status_code"),
+                title=profile.get("title"),
+                server=profile.get("server"),
+                csp=profile.get("csp"),
+                hsts=profile.get("hsts"),
+                cors=profile.get("cors"),
+                set_cookie_raw=profile.get("set_cookie_raw"),
+                cookie_flags_json=profile.get("cookie_flags_json"),
+                headers_json=profile.get("headers_json"),
+            )
+            session.add(new_profile)
+
+        count += 1
+
+    await session.commit()
+    return count
+
+
+async def upsert_service_fingerprints(
+    session: AsyncSession,
+    target_id: int,
+    fingerprints: list[dict[str, Any]],
+) -> int:
+    """Upsert service fingerprints for a target. New rows set first_seen_at, existing refresh last_seen_at."""
+    if not fingerprints:
+        return 0
+
+    count = 0
+    for fingerprint in fingerprints:
+        url = fingerprint.get("url")
+        if not url:
+            continue
+
+        stmt = select(ServiceFingerprint).where(
+            (ServiceFingerprint.target_id == target_id) & (ServiceFingerprint.url == url)
+        )
+        existing = await session.scalar(stmt)
+
+        if existing:
+            existing.favicon_hash = fingerprint.get("favicon_hash")
+            existing.body_hash = fingerprint.get("body_hash")
+            existing.title_hash = fingerprint.get("title_hash")
+            existing.last_seen_at = datetime.now(UTC)
+            await session.merge(existing)
+        else:
+            new_fingerprint = ServiceFingerprint(
+                target_id=target_id,
+                url=url,
+                favicon_hash=fingerprint.get("favicon_hash"),
+                body_hash=fingerprint.get("body_hash"),
+                title_hash=fingerprint.get("title_hash"),
+            )
+            session.add(new_fingerprint)
+
+        count += 1
+
+    await session.commit()
+    return count
+
+
+async def list_web_profiles(
+    session: AsyncSession,
+    target_id: int | None = None,
+    url: str | None = None,
+    since: timedelta | None = None,
+    limit: int | None = None,
+) -> list[WebProfileRow]:
+    """Query web profiles, most recently seen first."""
+    stmt = select(WebProfile)
+
+    if target_id is not None:
+        stmt = stmt.where(WebProfile.target_id == target_id)
+
+    if url is not None:
+        stmt = stmt.where(WebProfile.url == url)
+
+    if since is not None:
+        cutoff = datetime.now(UTC) - since
+        stmt = stmt.where(WebProfile.first_seen_at >= cutoff)
+
+    stmt = stmt.order_by(WebProfile.last_seen_at.desc())
+
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    rows = await session.scalars(stmt)
+    return [
+        WebProfileRow(
+            url=r.url,
+            status_code=r.status_code,
+            title=r.title,
+            server=r.server,
+            csp=r.csp,
+            hsts=r.hsts,
+            cors=r.cors,
+            set_cookie_raw=r.set_cookie_raw,
+            cookie_flags_json=r.cookie_flags_json,
+            headers_json=r.headers_json,
+            first_seen_at=r.first_seen_at,
+            last_seen_at=r.last_seen_at,
+        )
+        for r in rows
+    ]
+
+
+async def list_service_fingerprints(
+    session: AsyncSession,
+    target_id: int | None = None,
+    url: str | None = None,
+    since: timedelta | None = None,
+    limit: int | None = None,
+) -> list[ServiceFingerprintRow]:
+    """Query service fingerprints, most recently seen first."""
+    stmt = select(ServiceFingerprint)
+
+    if target_id is not None:
+        stmt = stmt.where(ServiceFingerprint.target_id == target_id)
+
+    if url is not None:
+        stmt = stmt.where(ServiceFingerprint.url == url)
+
+    if since is not None:
+        cutoff = datetime.now(UTC) - since
+        stmt = stmt.where(ServiceFingerprint.first_seen_at >= cutoff)
+
+    stmt = stmt.order_by(ServiceFingerprint.last_seen_at.desc())
+
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    rows = await session.scalars(stmt)
+    return [
+        ServiceFingerprintRow(
+            url=r.url,
+            favicon_hash=r.favicon_hash,
+            body_hash=r.body_hash,
+            title_hash=r.title_hash,
+            first_seen_at=r.first_seen_at,
+            last_seen_at=r.last_seen_at,
+        )
+        for r in rows
+    ]
 

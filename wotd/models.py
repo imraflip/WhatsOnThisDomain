@@ -356,3 +356,49 @@ class EndpointSnapshot(Base):
     )
     scan_run_id: Mapped[int | None] = mapped_column(ForeignKey("scan_runs.id"), nullable=True)
 
+
+class WebProfile(Base):
+    __tablename__ = "web_profiles"
+    __table_args__ = (UniqueConstraint("target_id", "url", name="uq_web_profile_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    server: Mapped[str | None] = mapped_column(Text, nullable=True)
+    csp: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hsts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cors: Mapped[str | None] = mapped_column(Text, nullable=True)
+    set_cookie_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cookie_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    headers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class ServiceFingerprint(Base):
+    __tablename__ = "service_fingerprints"
+    __table_args__ = (UniqueConstraint("target_id", "url", name="uq_service_fingerprint_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    favicon_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+

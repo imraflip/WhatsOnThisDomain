@@ -17,7 +17,6 @@ from wotd.modules.api_graphql import ApiGraphqlModule
 from wotd.modules.api_kiterunner import ApiKiterunnerModule
 from wotd.modules.api_openapi import ApiOpenApiModule
 from wotd.modules.api_passive import ApiPassiveModule
-from wotd.modules.archive_delta import ArchiveDeltaModule
 from wotd.modules.base import ModuleResult
 from wotd.modules.crawl import CrawlModule
 from wotd.modules.subdomains_active import SubdomainsActiveModule
@@ -25,6 +24,7 @@ from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.modules.tech_detect import TechDetectModule
+from wotd.modules.web_profile import WebProfileModule
 from wotd.notify import (
     NewHost,
     NotifyPayload,
@@ -45,8 +45,10 @@ from wotd.store import (
     JsEndpointRow,
     JsFileRow,
     JsSecretRow,
+    ServiceFingerprintRow,
     SubdomainRow,
     TechDetectionRow,
+    WebProfileRow,
     create_target,
     finish_scan_run,
     get_http_service_urls,
@@ -66,8 +68,10 @@ from wotd.store import (
     list_js_endpoints,
     list_js_files,
     list_js_secrets,
+    list_service_fingerprints,
     list_subdomains,
     list_tech_detections,
+    list_web_profiles,
     start_scan_run,
     upsert_interesting_subdomains,
 )
@@ -1469,6 +1473,66 @@ def discover_js(
     asyncio.run(_run_discover_js(target, notify, bruteforce_js))
 
 
+@app.command("web-profile")
+def web_profile(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Capture HTTP metadata posture and content fingerprints for all live services.
+
+    Probes every known HTTP service URL, extracts security headers (Server, CSP, HSTS, CORS),
+    parses cookie flags (Secure, HttpOnly, SameSite), and computes content hashes. Detects
+    metadata/fingerprint drift from prior scans and evaluates security posture.
+    """
+    asyncio.run(_run_web_profile(target, notify))
+
+
+async def _run_web_profile(target_name: str, notify: bool = False) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(target.root_domains.split(",")[0], RuleType.EXACT),
+                ScopeRule(f"*.{target.root_domains.split(',')[0]}", RuleType.WILDCARD),
+            ],
+        )
+
+        scan_run = await start_scan_run(session, target.id, "web_profile")
+
+        try:
+            module = WebProfileModule(session, target, scope)
+            result = await module.run()
+
+            await finish_scan_run(session, scan_run, status="completed", summary=_meta(result.stats))
+
+            console.print(f"[bold]web-profile scan completed[/bold]")
+            console.print(format_cli_summary(result.stats))
+
+            # Notify if requested and not first scan
+            if notify and await has_prior_scan(session, target.id, "web_profile"):
+                posture_findings = result.stats.get("posture_findings", 0)
+                profile_changes = result.stats.get("profile_changes", 0)
+
+                if posture_findings > 0 or profile_changes > 0:
+                    message = f"[wotd] {target_name} web-profile — {posture_findings} posture findings, {profile_changes} metadata changes"
+                    sent = await dispatch(message)
+                    if sent:
+                        console.print("[dim]notification sent[/dim]")
+
+        except Exception as e:
+            await finish_scan_run(session, scan_run, status="failed", summary={"error": str(e)})
+            console.print(f"[red]error[/red]: {e}")
+            raise typer.Exit(code=1)
+
+
 def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("url", overflow="fold")
@@ -2116,40 +2180,6 @@ async def _show_tech_detections(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
-@show_app.command("endpoint-deltas")
-def show_endpoint_deltas(
-    target: str | None = typer.Argument(
-        None, help="Target domain. Omit to show across all targets."
-    ),
-    kind: str | None = typer.Option(
-        None, "--kind",
-        help="Filter by change type: status_changed, content_type_changed, title_changed, body_hash_changed, unreachable.",
-    ),
-    url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows observed within this window (e.g. 24h, 7d)."
-    ),
-    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
-    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
-    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
-) -> None:
-    """List endpoint state changes (deltas) from archive-delta scans.
-    
-    Shows changes detected across scans: status code changes, content-type shifts,
-    page title changes, body content hashes, and unreachable endpoints.
-    """
-    since_td: timedelta | None = None
-    if since:
-        try:
-            since_td = parse_duration(since)
-        except ValueError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(code=2) from e
-    
-    effective_limit: int | None = None if all_rows or limit == 0 else limit
-    asyncio.run(_show_endpoint_deltas(target, kind, url, since_td, effective_limit, as_json))
-
-
 def _render_endpoint_deltas_table(rows: list[EndpointDeltaRow]) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("url", overflow="fold")
@@ -2210,6 +2240,200 @@ async def _show_endpoint_deltas(
 
     console.print(_render_endpoint_deltas_table(rows))
     console.print(f"[dim]{len(rows)} change(s)[/dim]")
+
+
+def _render_web_profiles_table(rows: list[WebProfileRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("status", justify="right")
+    table.add_column("server", style="dim", overflow="fold")
+    table.add_column("csp", style="dim")
+    table.add_column("hsts", style="dim")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        status_str = str(r.status_code) if r.status_code else "-"
+        csp_str = "✓" if r.csp else "✗"
+        hsts_str = "✓" if r.hsts else "✗"
+        table.add_row(
+            r.url,
+            status_str,
+            r.server or "-",
+            csp_str,
+            hsts_str,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_web_profiles(
+    target_name: str | None,
+    url: str | None,
+    since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_web_profiles(session, target_id=target_id, url=url, since=since, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "status_code": r.status_code,
+                        "title": r.title,
+                        "server": r.server,
+                        "csp": r.csp,
+                        "hsts": r.hsts,
+                        "cors": r.cors,
+                        "set_cookie_raw": r.set_cookie_raw,
+                        "cookie_flags_json": r.cookie_flags_json,
+                        "headers_json": r.headers_json,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no web profiles found[/yellow]")
+        return
+
+    console.print(_render_web_profiles_table(rows))
+    console.print(f"[dim]{len(rows)} profile(s)[/dim]")
+
+
+@show_app.command("web-profiles")
+def show_web_profiles(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List HTTP metadata profiles with security headers and posture."""
+    since_td: timedelta | None = None
+    if since:
+        try:
+            since_td = parse_duration(since)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=2) from e
+    
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_web_profiles(target, url, since_td, effective_limit, as_json))
+
+
+def _render_service_fingerprints_table(rows: list[ServiceFingerprintRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("favicon_hash", style="dim", overflow="fold")
+    table.add_column("body_hash", style="dim", overflow="fold")
+    table.add_column("title_hash", style="dim", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        favicon_str = r.favicon_hash[:16] + "…" if r.favicon_hash else "-"
+        body_str = r.body_hash[:16] + "…" if r.body_hash else "-"
+        title_str = r.title_hash[:16] + "…" if r.title_hash else "-"
+        table.add_row(
+            r.url,
+            favicon_str,
+            body_str,
+            title_str,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_service_fingerprints(
+    target_name: str | None,
+    url: str | None,
+    since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_service_fingerprints(session, target_id=target_id, url=url, since=since, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "favicon_hash": r.favicon_hash,
+                        "body_hash": r.body_hash,
+                        "title_hash": r.title_hash,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no service fingerprints found[/yellow]")
+        return
+
+    console.print(_render_service_fingerprints_table(rows))
+    console.print(f"[dim]{len(rows)} fingerprint(s)[/dim]")
+
+
+@show_app.command("service-fingerprints")
+def show_service_fingerprints(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List service fingerprints with content hashes."""
+    since_td: timedelta | None = None
+    if since:
+        try:
+            since_td = parse_duration(since)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=2) from e
+    
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_service_fingerprints(target, url, since_td, effective_limit, as_json))
 
 
 _EXAMPLES = """\
