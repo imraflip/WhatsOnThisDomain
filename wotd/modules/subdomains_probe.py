@@ -102,9 +102,7 @@ class SubdomainsProbeModule(Module):
                                 "wordlist_key": tech_to_wordlist_key(t),
                             }
                         )
-        new_techs, _ = await upsert_tech_detections(
-            self.session, self.target.id, tech_detections
-        )
+        new_techs, _ = await upsert_tech_detections(self.session, self.target.id, tech_detections)
 
         return ModuleResult(
             module=self.name,

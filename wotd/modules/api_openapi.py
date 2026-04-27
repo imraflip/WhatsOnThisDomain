@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json as json_lib
-import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -63,18 +62,18 @@ class ApiOpenApiModule(Module):
                     spec_type = spec_data.get("spec_type", "unknown")
                     routes_count = spec_data.get("routes_count", 0)
 
-                    specs.append({
-                        "url": spec_url,
-                        "host": host,
-                        "spec_type": spec_type,
-                        "routes_count": routes_count,
-                        "raw_spec": raw_spec,
-                    })
+                    specs.append(
+                        {
+                            "url": spec_url,
+                            "host": host,
+                            "spec_type": spec_type,
+                            "routes_count": routes_count,
+                            "raw_spec": raw_spec,
+                        }
+                    )
 
                     # Extract routes from the spec
-                    extracted = await self._extract_routes(
-                        spec_url, spec_data, host
-                    )
+                    extracted = await self._extract_routes(spec_url, spec_data, host)
                     routes.extend(extracted)
 
                     # Step 5: sj cross-validation (if available)
@@ -117,10 +116,14 @@ class ApiOpenApiModule(Module):
         """Step 1: Discovery via ffuf with openapi_paths.txt."""
         cmd = [
             "ffuf",
-            "-u", base_url.rstrip("/") + "/FUZZ",
-            "-w", "/opt/wotd/wordlists/openapi_paths.txt",
-            "-mc", "200",
-            "-t", "20",
+            "-u",
+            base_url.rstrip("/") + "/FUZZ",
+            "-w",
+            "/opt/wotd/wordlists/openapi_paths.txt",
+            "-mc",
+            "200",
+            "-t",
+            "20",
             "-json",
             "-s",  # silent
         ]
@@ -144,12 +147,15 @@ class ApiOpenApiModule(Module):
 
     def _looks_like_spec(self, content_type: str) -> bool:
         """Check if content type looks like OpenAPI spec."""
-        return any(ct in content_type for ct in [
-            "application/json",
-            "application/yaml",
-            "text/yaml",
-            "text/plain",
-        ])
+        return any(
+            ct in content_type
+            for ct in [
+                "application/json",
+                "application/yaml",
+                "text/yaml",
+                "text/plain",
+            ]
+        )
 
     async def _validate_spec(self, spec_url: str) -> dict[str, Any] | None:
         """Step 2: Download and validate spec."""
@@ -237,15 +243,17 @@ class ApiOpenApiModule(Module):
                                 break
 
                     route_url = spec_url.rstrip("/") + path
-                    routes.append({
-                        "url": route_url,
-                        "host": host,
-                        "method": method.upper(),
-                        "status_code": 200,
-                        "content_type": content_type,
-                        "source": "openapi_spec",
-                        "spec_url": spec_url,
-                    })
+                    routes.append(
+                        {
+                            "url": route_url,
+                            "host": host,
+                            "method": method.upper(),
+                            "status_code": 200,
+                            "content_type": content_type,
+                            "source": "openapi_spec",
+                            "spec_url": spec_url,
+                        }
+                    )
         except Exception as e:
             self.logger.debug(f"Route extraction failed: {e}")
 
@@ -256,7 +264,8 @@ class ApiOpenApiModule(Module):
         cmd = [
             "sj",
             "endpoints",
-            "-u", spec_url,
+            "-u",
+            spec_url,
             "-j",
         ]
 
@@ -273,15 +282,17 @@ class ApiOpenApiModule(Module):
                     method = ep.get("method", "GET").upper()
                     path = ep.get("path", "")
                     if path:
-                        routes.append({
-                            "url": spec_url.rstrip("/") + path,
-                            "host": host,
-                            "method": method,
-                            "status_code": 200,
-                            "content_type": None,
-                            "source": "sj",
-                            "spec_url": spec_url,
-                        })
+                        routes.append(
+                            {
+                                "url": spec_url.rstrip("/") + path,
+                                "host": host,
+                                "method": method,
+                                "status_code": 200,
+                                "content_type": None,
+                                "source": "sj",
+                                "spec_url": spec_url,
+                            }
+                        )
             except (json_lib.JSONDecodeError, ValueError):
                 pass
         except Exception as e:

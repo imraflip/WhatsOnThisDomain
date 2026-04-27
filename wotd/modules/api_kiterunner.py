@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json as json_lib
 from typing import Any
 from urllib.parse import urlparse
@@ -55,7 +54,9 @@ class ApiKiterunnerModule(Module):
         # Determine if tRPC is present by checking api_routes for trpc_passive source
         trpc_hit_count = 0
         if not self.force_trpc:
-            existing = await list_api_routes(self.session, self.target.id, source="trpc_passive", limit=None)
+            existing = await list_api_routes(
+                self.session, self.target.id, source="trpc_passive", limit=None
+            )
             trpc_hit_count = len(existing)
 
         should_run_trpc = self.force_trpc or trpc_hit_count > 0
@@ -122,10 +123,13 @@ class ApiKiterunnerModule(Module):
             "kr",
             "scan",
             url,
-            "-w", "/opt/wotd/wordlists/routes-large.kite",
+            "-w",
+            "/opt/wotd/wordlists/routes-large.kite",
             "--json",
-            "-x", "20",
-            "--ignore-length", "34",
+            "-x",
+            "20",
+            "--ignore-length",
+            "34",
             "-q",
         ]
         output = await run_tool(cmd, timeout=300, binary_check=True)
@@ -141,12 +145,14 @@ class ApiKiterunnerModule(Module):
                 method = req.get("Method", "GET")
                 status_code = item.get("StatusCode")
                 if path:
-                    routes.append({
-                        "url": url.rstrip("/") + path,
-                        "method": method,
-                        "status_code": status_code,
-                        "content_type": None,
-                    })
+                    routes.append(
+                        {
+                            "url": url.rstrip("/") + path,
+                            "method": method,
+                            "status_code": status_code,
+                            "content_type": None,
+                        }
+                    )
             except (json_lib.JSONDecodeError, ValueError):
                 continue
 
@@ -158,10 +164,13 @@ class ApiKiterunnerModule(Module):
             "kr",
             "brute",
             url,
-            "-w", "/opt/wotd/wordlists/api_routes.txt",
+            "-w",
+            "/opt/wotd/wordlists/api_routes.txt",
             "--json",
-            "-x", "20",
-            "-d", "0",
+            "-x",
+            "20",
+            "-d",
+            "0",
             "-q",
         ]
         output = await run_tool(cmd, timeout=300, binary_check=True)
@@ -177,12 +186,14 @@ class ApiKiterunnerModule(Module):
                 method = req.get("Method", "GET")
                 status_code = item.get("StatusCode")
                 if path:
-                    routes.append({
-                        "url": url.rstrip("/") + path,
-                        "method": method,
-                        "status_code": status_code,
-                        "content_type": None,
-                    })
+                    routes.append(
+                        {
+                            "url": url.rstrip("/") + path,
+                            "method": method,
+                            "status_code": status_code,
+                            "content_type": None,
+                        }
+                    )
             except (json_lib.JSONDecodeError, ValueError):
                 continue
 
@@ -192,15 +203,23 @@ class ApiKiterunnerModule(Module):
         """Run tRPC active probe via ffuf."""
         cmd = [
             "ffuf",
-            "-u", url.rstrip("/") + "/FUZZ",
-            "-w", "/opt/wotd/wordlists/trpc_paths.txt",
-            "-X", "POST",
-            "-d", '{"input":{}}',
-            "-H", "Content-Type: application/json",
-            "-mc", "200,400",
-            "-fc", "404",
+            "-u",
+            url.rstrip("/") + "/FUZZ",
+            "-w",
+            "/opt/wotd/wordlists/trpc_paths.txt",
+            "-X",
+            "POST",
+            "-d",
+            '{"input":{}}',
+            "-H",
+            "Content-Type: application/json",
+            "-mc",
+            "200,400",
+            "-fc",
+            "404",
             "-json",
-            "-t", "30",
+            "-t",
+            "30",
         ]
         output = await run_tool(cmd, timeout=300, binary_check=True)
 
@@ -211,12 +230,14 @@ class ApiKiterunnerModule(Module):
                 url_str = result.get("url", "")
                 status = result.get("status", 400)
                 if url_str:
-                    routes.append({
-                        "url": url_str,
-                        "method": "POST",
-                        "status_code": status,
-                        "content_type": None,
-                    })
+                    routes.append(
+                        {
+                            "url": url_str,
+                            "method": "POST",
+                            "status_code": status,
+                            "content_type": None,
+                        }
+                    )
         except (json_lib.JSONDecodeError, ValueError):
             pass
 

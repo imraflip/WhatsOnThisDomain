@@ -37,7 +37,5 @@ async def init_db(db_path: Path | None = None) -> None:
         # M42: add wordlist column to existing dir_results tables created before this milestone
         result = await conn.execute(text("PRAGMA table_info(dir_results)"))
         if "wordlist" not in {row[1] for row in result}:
-            await conn.execute(
-                text("ALTER TABLE dir_results ADD COLUMN wordlist TEXT")
-            )
+            await conn.execute(text("ALTER TABLE dir_results ADD COLUMN wordlist TEXT"))
     await engine.dispose()

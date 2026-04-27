@@ -120,11 +120,15 @@ class ApiGraphqlModule(Module):
         # First, use ffuf with graphql_paths.txt to find candidates
         cmd = [
             "ffuf",
-            "-u", base_url.rstrip("/") + "/FUZZ",
-            "-w", "/opt/wotd/wordlists/graphql_paths.txt",
-            "-mc", "200,201,400",
+            "-u",
+            base_url.rstrip("/") + "/FUZZ",
+            "-w",
+            "/opt/wotd/wordlists/graphql_paths.txt",
+            "-mc",
+            "200,201,400",
             "-json",
-            "-t", "20",
+            "-t",
+            "20",
             "-s",  # silent
         ]
 
@@ -157,9 +161,12 @@ class ApiGraphqlModule(Module):
         cmd = [
             "curl",
             "-s",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", '{"query":"{ __typename }"}',
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            '{"query":"{ __typename }"}',
             url,
         ]
 
@@ -179,16 +186,19 @@ class ApiGraphqlModule(Module):
         """Phase 2: Try to introspect the GraphQL schema."""
         introspection_query = (
             '{"query":"{ __schema { queryType { name } mutationType { name } '
-            'subscriptionType { name } types { name kind fields { name type { name kind ofType '
+            "subscriptionType { name } types { name kind fields { name type { name kind ofType "
             '{ name kind } } args { name } } } } }"}'
         )
 
         cmd = [
             "curl",
             "-s",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", introspection_query,
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            introspection_query,
             url,
         ]
 
@@ -231,15 +241,17 @@ class ApiGraphqlModule(Module):
                 for field in query_type.get("fields", []):
                     field_name = field.get("name")
                     if field_name:
-                        routes.append({
-                            "url": url,
-                            "host": host,
-                            "method": "POST",
-                            "status_code": 200,
-                            "content_type": "application/json",
-                            "source": "graphql_introspection",
-                            "spec_url": None,
-                        })
+                        routes.append(
+                            {
+                                "url": url,
+                                "host": host,
+                                "method": "POST",
+                                "status_code": 200,
+                                "content_type": "application/json",
+                                "source": "graphql_introspection",
+                                "spec_url": None,
+                            }
+                        )
 
             # Extract Mutation type fields
             mutation_type = schema_obj.get("mutationType", {})
@@ -247,15 +259,17 @@ class ApiGraphqlModule(Module):
                 for field in mutation_type.get("fields", []):
                     field_name = field.get("name")
                     if field_name:
-                        routes.append({
-                            "url": url,
-                            "host": host,
-                            "method": "POST",
-                            "status_code": 200,
-                            "content_type": "application/json",
-                            "source": "graphql_introspection",
-                            "spec_url": None,
-                        })
+                        routes.append(
+                            {
+                                "url": url,
+                                "host": host,
+                                "method": "POST",
+                                "status_code": 200,
+                                "content_type": "application/json",
+                                "source": "graphql_introspection",
+                                "spec_url": None,
+                            }
+                        )
         except Exception as e:
             self.logger.debug(f"Failed to extract routes from introspection: {e}")
 
@@ -265,9 +279,11 @@ class ApiGraphqlModule(Module):
         """Phase 3: Fingerprint GraphQL server implementation via graphw00f."""
         cmd = [
             "graphw00f",
-            "-t", url,
+            "-t",
+            url,
             "-d",
-            "-f", "json",
+            "-f",
+            "json",
         ]
 
         try:

@@ -16,16 +16,47 @@ from wotd.store import upsert_endpoints, upsert_interesting_endpoints
 from wotd.tools import ToolNotFoundError, ToolResult, run_gf, run_tool
 
 _GF_ENDPOINT_PATTERNS: tuple[str, ...] = (
-    "xss", "sqli", "ssrf", "redirect", "rce", "lfi", "idor",
-    "ssti", "interestingparams", "upload-fields", "debug_logic",
+    "xss",
+    "sqli",
+    "ssrf",
+    "redirect",
+    "rce",
+    "lfi",
+    "idor",
+    "ssti",
+    "interestingparams",
+    "upload-fields",
+    "debug_logic",
 )
 
-_SKIP_EXTENSIONS: frozenset[str] = frozenset({
-    ".css", ".scss", ".less",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".bmp", ".tiff",
-    ".mp4", ".mp3", ".wav", ".ogg", ".webm", ".avi", ".mov",
-})
+_SKIP_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".css",
+        ".scss",
+        ".less",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".svg",
+        ".webp",
+        ".bmp",
+        ".tiff",
+        ".mp4",
+        ".mp3",
+        ".wav",
+        ".ogg",
+        ".webm",
+        ".avi",
+        ".mov",
+    }
+)
 
 
 def _skip_ext(url: str) -> bool:

@@ -110,11 +110,16 @@ async def _ffuf_js_pass(base_url: str) -> list[str]:
     result = await run_tool(
         "ffuf",
         [
-            "-u", f"{base_url}/FUZZ",
-            "-w", _WORDLIST_JS,
-            "-rate", "150",
-            "-t", "50",
-            "-mc", "200,204",
+            "-u",
+            f"{base_url}/FUZZ",
+            "-w",
+            _WORDLIST_JS,
+            "-rate",
+            "150",
+            "-t",
+            "50",
+            "-mc",
+            "200,204",
             "-json",
         ],
         timeout=None,
@@ -293,9 +298,7 @@ class JsDiscoveryModule(Module):
         new_ep, existing_ep, new_ep_urls = await upsert_js_endpoints(
             self.session, self.target.id, endpoint_dicts
         )
-        new_sec, existing_sec = await upsert_js_secrets(
-            self.session, self.target.id, secret_dicts
-        )
+        new_sec, existing_sec = await upsert_js_secrets(self.session, self.target.id, secret_dicts)
 
         stats: dict[str, object] = {
             "js_files_total": len(url_to_sources),

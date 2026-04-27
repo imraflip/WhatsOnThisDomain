@@ -21,7 +21,7 @@ from wotd.tools import run_tool
 
 class ArchiveDeltaModule(Module):
     """Re-probe known endpoints and track state changes.
-    
+
     Reads all endpoints for a target from the database, re-probes them via httpx-pd,
     stores snapshots of the current state, and generates delta reports for changed fields
     (status, content_type, title, body_hash, unreachable).
@@ -38,7 +38,7 @@ class ArchiveDeltaModule(Module):
 
     async def _probe_endpoints(self, urls: list[str]) -> dict[str, dict[str, Any]]:
         """Probe a list of endpoint URLs via httpx-pd.
-        
+
         Returns a dict mapping URL to probe result (status, content_type, title, body_hash).
         """
         if not urls:
@@ -50,7 +50,8 @@ class ArchiveDeltaModule(Module):
             [
                 "-json",
                 "-silent",
-                "-timeout", "10",
+                "-timeout",
+                "10",
             ],
             input_data="\n".join(urls),
             timeout=None,
@@ -84,7 +85,7 @@ class ArchiveDeltaModule(Module):
 
     async def run(self) -> ModuleResult:
         """Execute the archive delta module.
-        
+
         1. Read all known endpoints for this target from the database.
         2. Re-probe them via httpx-pd.
         3. Store snapshots of the current state.
@@ -116,13 +117,15 @@ class ArchiveDeltaModule(Module):
         # Build snapshot list from probes
         snapshots: list[dict[str, Any]] = []
         for url, probe in probes.items():
-            snapshots.append({
-                "url": url,
-                "status_code": probe.get("status_code"),
-                "content_type": probe.get("content_type"),
-                "title": probe.get("title"),
-                "body_hash": probe.get("body_hash"),
-            })
+            snapshots.append(
+                {
+                    "url": url,
+                    "status_code": probe.get("status_code"),
+                    "content_type": probe.get("content_type"),
+                    "title": probe.get("title"),
+                    "body_hash": probe.get("body_hash"),
+                }
+            )
 
         # Scope-check hosts in snapshots before writing
         filtered_snapshots = []
@@ -131,6 +134,7 @@ class ArchiveDeltaModule(Module):
             # Extract host from URL
             try:
                 from urllib.parse import urlparse
+
                 parsed = urlparse(url)
                 host = parsed.hostname or ""
                 if host and self.scope.is_in_scope(host):
@@ -166,4 +170,3 @@ class ArchiveDeltaModule(Module):
                 "delta_breakdown": delta_counts,
             },
         )
-

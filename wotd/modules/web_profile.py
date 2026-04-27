@@ -49,7 +49,9 @@ class WebProfileModule(Module):
             return None
         return hashlib.sha256(title.encode()).hexdigest()
 
-    async def _extract_headers(self, headers_json: str | None) -> tuple[str | None, str | None, str | None, str | None]:
+    async def _extract_headers(
+        self, headers_json: str | None
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """Extract Server, CSP, HSTS, CORS headers from httpx output.
 
         Returns (server, csp, hsts, cors).
@@ -109,7 +111,8 @@ class WebProfileModule(Module):
             [
                 "-json",
                 "-silent",
-                "-timeout", "10",
+                "-timeout",
+                "10",
             ],
             stdin_data="\n".join(urls),
             timeout=None,
@@ -243,37 +246,45 @@ class WebProfileModule(Module):
                 continue
 
             # Build web profile record
-            profiles.append({
-                "url": url,
-                "status_code": probe.get("status_code"),
-                "title": probe.get("title"),
-                "server": probe.get("server"),
-                "csp": probe.get("csp"),
-                "hsts": probe.get("hsts"),
-                "cors": probe.get("cors"),
-                "set_cookie_raw": probe.get("set_cookie_raw"),
-                "cookie_flags_json": probe.get("cookie_flags_json"),
-                "headers_json": probe.get("headers_json"),
-            })
+            profiles.append(
+                {
+                    "url": url,
+                    "status_code": probe.get("status_code"),
+                    "title": probe.get("title"),
+                    "server": probe.get("server"),
+                    "csp": probe.get("csp"),
+                    "hsts": probe.get("hsts"),
+                    "cors": probe.get("cors"),
+                    "set_cookie_raw": probe.get("set_cookie_raw"),
+                    "cookie_flags_json": probe.get("cookie_flags_json"),
+                    "headers_json": probe.get("headers_json"),
+                }
+            )
 
             # Build service fingerprint record
-            fingerprints.append({
-                "url": url,
-                "favicon_hash": probe.get("favicon_hash"),
-                "body_hash": probe.get("body_hash"),
-                "title_hash": probe.get("title_hash"),
-            })
+            fingerprints.append(
+                {
+                    "url": url,
+                    "favicon_hash": probe.get("favicon_hash"),
+                    "body_hash": probe.get("body_hash"),
+                    "title_hash": probe.get("title_hash"),
+                }
+            )
 
         # Store profiles and fingerprints
         profiles_stored = await upsert_web_profiles(self.session, self.target.id, profiles)
-        fingerprints_stored = await upsert_service_fingerprints(self.session, self.target.id, fingerprints)
+        fingerprints_stored = await upsert_service_fingerprints(
+            self.session, self.target.id, fingerprints
+        )
 
         # Evaluate posture
         posture_findings = await self._evaluate_posture(profiles)
 
         # Compare against prior profiles for drift detection
         prior_profiles = await list_web_profiles(self.session, target_id=self.target.id, limit=None)
-        prior_fingerprints = await list_service_fingerprints(self.session, target_id=self.target.id, limit=None)
+        prior_fingerprints = await list_service_fingerprints(
+            self.session, target_id=self.target.id, limit=None
+        )
 
         # Count changes: URLs with different server, CSP/HSTS, or fingerprint hashes
         profile_changes = 0
@@ -283,9 +294,11 @@ class WebProfileModule(Module):
             for prior in prior_profiles:
                 if prior.url == url:
                     # Check for meaningful drift
-                    if (prior.server != profile.get("server") or
-                        prior.csp != profile.get("csp") or
-                        prior.hsts != profile.get("hsts")):
+                    if (
+                        prior.server != profile.get("server")
+                        or prior.csp != profile.get("csp")
+                        or prior.hsts != profile.get("hsts")
+                    ):
                         profile_changes += 1
                     break
 
@@ -299,4 +312,3 @@ class WebProfileModule(Module):
                 "profile_changes": profile_changes,
             },
         )
-
