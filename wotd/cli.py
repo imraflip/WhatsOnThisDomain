@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotd.db import get_session_factory, init_db
 from wotd.models import HttpService
+from wotd.modules.api_graphql import ApiGraphqlModule
+from wotd.modules.api_kiterunner import ApiKiterunnerModule
+from wotd.modules.api_openapi import ApiOpenApiModule
+from wotd.modules.api_passive import ApiPassiveModule
 from wotd.modules.base import ModuleResult
 from wotd.modules.crawl import CrawlModule
 from wotd.modules.subdomains_active import SubdomainsActiveModule
@@ -29,8 +33,11 @@ from wotd.notify import (
 )
 from wotd.scope import RuleType, Scope, ScopeRule
 from wotd.store import (
+    ApiRouteRow,
+    ApiSpecRow,
     DirResultRow,
     EndpointRow,
+    GraphqlEndpointRow,
     InterestingEndpointRow,
     InterestingSubdomainRow,
     JsEndpointRow,
@@ -46,7 +53,10 @@ from wotd.store import (
     get_target_by_name,
     get_tech_wordlist_keys,
     has_prior_scan,
+    list_api_routes,
+    list_api_specs,
     list_dir_results,
+    list_graphql_endpoints,
     list_endpoints,
     list_interesting_endpoints,
     list_interesting_subdomains,
@@ -840,6 +850,197 @@ async def _resolve_tech_wordlists(
     return paths, auto_included, has_any_detections
 
 
+async def _run_api_passive(target_name: str, notify: bool = False) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, ApiPassiveModule.name)
+
+        scan_run = await start_scan_run(session, target.id, ApiPassiveModule.name)
+        module = ApiPassiveModule(session, target, scope)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{ApiPassiveModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+        new_routes: int = result.stats.get("new_routes", 0)
+        new_keys: list[str] = result.stats.get("new_keys", [])
+
+        if is_first:
+            console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+        elif notify and new_routes:
+            message = f"[wotd] {target_name} api-passive — {new_routes} new API routes"
+            if new_keys:
+                message += "\n\n" + "\n".join(new_keys[:10])
+            sent = await dispatch(message)
+            if sent:
+                console.print("[dim]notification sent[/dim]")
+
+
+async def _run_api_kiterunner(
+    target_name: str,
+    notify: bool = False,
+    skip_brute: bool = False,
+    skip_trpc: bool = False,
+    force_trpc: bool = False,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, ApiKiterunnerModule.name)
+
+        scan_run = await start_scan_run(session, target.id, ApiKiterunnerModule.name)
+        module = ApiKiterunnerModule(
+            session, target, scope, skip_brute=skip_brute, skip_trpc=skip_trpc, force_trpc=force_trpc
+        )
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{ApiKiterunnerModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+        new_routes: int = result.stats.get("routes_upserted", 0)
+        new_keys: list[str] = result.stats.get("new_keys", [])
+
+        if is_first:
+            console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+        elif notify and new_routes:
+            message = f"[wotd] {target_name} api-kiterunner — {new_routes} new API routes"
+            if new_keys:
+                message += "\n\n" + "\n".join(new_keys[:10])
+            sent = await dispatch(message)
+            if sent:
+                console.print("[dim]notification sent[/dim]")
+
+
+async def _run_api_graphql(target_name: str, notify: bool = False) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, ApiGraphqlModule.name)
+
+        scan_run = await start_scan_run(session, target.id, ApiGraphqlModule.name)
+        module = ApiGraphqlModule(session, target, scope)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{ApiGraphqlModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+        new_gql: int = result.stats.get("graphql_endpoints_new", 0)
+        new_routes: int = result.stats.get("routes_new", 0)
+        new_urls: list[str] = result.stats.get("new_urls", [])
+
+        if is_first:
+            console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+        elif notify and (new_gql or new_routes):
+            parts = []
+            if new_gql:
+                parts.append(f"{new_gql} new GraphQL endpoint(s)")
+            if new_routes:
+                parts.append(f"{new_routes} new route(s) from introspection")
+            message = f"[wotd] {target_name} api-graphql — " + ", ".join(parts)
+            if new_urls:
+                message += "\n\n" + "\n".join(new_urls[:8])
+            sent = await dispatch(message)
+            if sent:
+                console.print("[dim]notification sent[/dim]")
+
+
+async def _run_api_openapi(target_name: str, notify: bool = False) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, ApiOpenApiModule.name)
+
+        scan_run = await start_scan_run(session, target.id, ApiOpenApiModule.name)
+        module = ApiOpenApiModule(session, target, scope)
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{ApiOpenApiModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+        new_specs: int = result.stats.get("specs_new", 0)
+        new_routes: int = result.stats.get("routes_new", 0)
+        sj_extra: int = result.stats.get("sj_extra_routes", 0)
+        new_spec_urls: list[str] = result.stats.get("new_spec_urls", [])
+
+        if is_first:
+            console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+        elif notify and (new_specs or new_routes or sj_extra):
+            parts = []
+            if new_specs:
+                parts.append(f"{new_specs} new spec(s)")
+            if new_routes:
+                parts.append(f"{new_routes} new route(s)")
+            if sj_extra:
+                parts.append(f"{sj_extra} extra route(s) via sj")
+            message = f"[wotd] {target_name} api-openapi — " + ", ".join(parts)
+            if new_spec_urls:
+                message += "\n\n" + "\n".join(new_spec_urls[:8])
+            sent = await dispatch(message)
+            if sent:
+                console.print("[dim]notification sent[/dim]")
+
+
 async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) -> None:
     from urllib.parse import urlparse
 
@@ -1035,6 +1236,209 @@ def dirbust(
         asyncio.run(_run_dirbust(target_or_url, notify, tech))
     else:
         asyncio.run(_run_dirbust_target(target_or_url, notify, tech))
+
+
+@app.command("api-passive")
+def api_passive(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Extract passive API surface from existing endpoints + JS endpoints.
+
+    Reads previously discovered URLs from the endpoints and js_endpoints tables
+    and pattern-matches anything that looks like an API route. No tool runs,
+    no network — purely a database transformation. Results upserted into api_routes.
+    """
+    asyncio.run(_run_api_passive(target, notify))
+
+
+@app.command("api-kiterunner")
+def api_kiterunner(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+    skip_brute: bool = typer.Option(
+        False, "--skip-brute", help="Skip kr brute (path-only) pass."
+    ),
+    skip_trpc: bool = typer.Option(
+        False, "--skip-trpc", help="Skip tRPC procedure probing via ffuf."
+    ),
+    force_trpc: bool = typer.Option(
+        False, "--force-trpc", help="Force tRPC probing even if no trpc_passive routes found."
+    ),
+) -> None:
+    """Run active API route discovery against live HTTP services.
+
+    Runs three passes: kr scan (method-aware, primary), kr brute (path-only),
+    and tRPC probe via ffuf (only if trpc_passive routes detected or --force-trpc).
+    Requires prior subdomains scan to populate http_services table.
+    """
+    asyncio.run(_run_api_kiterunner(target, notify, skip_brute, skip_trpc, force_trpc))
+
+
+@app.command("api-graphql")
+def api_graphql(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Detect GraphQL endpoints, enable introspection, extract routes, and fingerprint servers.
+
+    Runs ffuf against live HTTP services with common GraphQL paths, attempts introspection
+    queries to extract schema and routes, and fingerprints the GraphQL implementation
+    (Apollo, Hasura, AWS AppSync, etc.) via graphw00f.
+    """
+    asyncio.run(_run_api_graphql(target, notify))
+
+
+@app.command("api-openapi")
+def api_openapi(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Harvest OpenAPI/Swagger specs and extract API routes.
+
+    Discovers spec files via ffuf with common paths, validates and parses them,
+    extracts routes, and cross-validates with sj for additional routes captured
+    via $ref resolution and parameterized-path expansion.
+    """
+    asyncio.run(_run_api_openapi(target, notify))
+
+
+@app.command("api-discover")
+def api_discover(
+    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+    skip: list[str] = typer.Option(
+        None, "--skip",
+        help="Skip a phase: passive, kiterunner, graphql, openapi (repeatable).",
+    ),
+    skip_brute: bool = typer.Option(
+        False, "--skip-brute", help="Skip kr brute pass (applies to api-kiterunner)."
+    ),
+    skip_trpc: bool = typer.Option(
+        False, "--skip-trpc", help="Skip tRPC probing (applies to api-kiterunner)."
+    ),
+    force_trpc: bool = typer.Option(
+        False, "--force-trpc", help="Force tRPC probing (applies to api-kiterunner)."
+    ),
+) -> None:
+    """Master command orchestrating all API discovery phases.
+
+    Runs api-passive → api-kiterunner → api-graphql → api-openapi in sequence.
+    Each phase wrapped in try/except so a missing tool doesn't abort the rest.
+    Use --skip to disable individual phases (repeatable). Sub-pass flags forwarded
+    to api-kiterunner.
+    """
+    skip_phases = set(skip) if skip else set()
+    asyncio.run(
+        _run_api_discover(
+            target,
+            notify,
+            skip_phases,
+            skip_brute,
+            skip_trpc,
+            force_trpc,
+        )
+    )
+
+
+async def _run_api_discover(
+    target_name: str,
+    notify: bool,
+    skip_phases: set[str],
+    skip_brute: bool = False,
+    skip_trpc: bool = False,
+    force_trpc: bool = False,
+) -> None:
+    """Orchestrate all API discovery phases with unified notification."""
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            target = await create_target(session, name=target_name, root_domains=[target_name])
+
+        is_first_overall = True
+        total_api_routes = 0
+        total_graphql_endpoints = 0
+        total_specs = 0
+        all_errors = []
+
+        # Phase 1: api-passive
+        if "passive" not in skip_phases:
+            try:
+                await _run_api_passive(target_name, notify=False)
+                is_first_overall = False
+            except Exception as e:
+                all_errors.append(f"api-passive: {e}")
+                console.print(f"[yellow]api-passive warning: {e}[/yellow]")
+
+        # Phase 2: api-kiterunner
+        if "kiterunner" not in skip_phases:
+            try:
+                await _run_api_kiterunner(target_name, notify=False, skip_brute=skip_brute, skip_trpc=skip_trpc, force_trpc=force_trpc)
+                is_first_overall = False
+            except Exception as e:
+                all_errors.append(f"api-kiterunner: {e}")
+                console.print(f"[yellow]api-kiterunner warning: {e}[/yellow]")
+
+        # Phase 3: api-graphql
+        if "graphql" not in skip_phases:
+            try:
+                await _run_api_graphql(target_name, notify=False)
+                is_first_overall = False
+            except Exception as e:
+                all_errors.append(f"api-graphql: {e}")
+                console.print(f"[yellow]api-graphql warning: {e}[/yellow]")
+
+        # Phase 4: api-openapi
+        if "openapi" not in skip_phases:
+            try:
+                await _run_api_openapi(target_name, notify=False)
+                is_first_overall = False
+            except Exception as e:
+                all_errors.append(f"api-openapi: {e}")
+                console.print(f"[yellow]api-openapi warning: {e}[/yellow]")
+
+        # Unified notification
+        if notify and not is_first_overall:
+            async with session_factory() as session_for_counts:
+                target = await get_target_by_name(session_for_counts, target_name)
+                if target:
+                    route_rows = await list_api_routes(session_for_counts, target.id, limit=None)
+                    gql_rows = await list_graphql_endpoints(session_for_counts, target.id, limit=None)
+                    spec_rows = await list_api_specs(session_for_counts, target.id, limit=None)
+
+                    total_api_routes = len(route_rows)
+                    total_graphql_endpoints = len(gql_rows)
+                    total_specs = len(spec_rows)
+
+                    if total_api_routes or total_graphql_endpoints or total_specs:
+                        parts = []
+                        if total_api_routes:
+                            parts.append(f"{total_api_routes} API routes")
+                        if total_graphql_endpoints:
+                            gql_introspect = sum(1 for r in gql_rows if r.introspection_enabled)
+                            parts.append(f"{total_graphql_endpoints} GraphQL endpoints ({gql_introspect} introspectable)")
+                        if total_specs:
+                            parts.append(f"{total_specs} specs")
+
+                        message = f"[wotd] {target_name} api-discover — " + ", ".join(parts)
+                        if all_errors:
+                            message += f"\n\n⚠️ Warnings: {'; '.join(all_errors)}"
+                        sent = await dispatch(message)
+                        if sent:
+                            console.print("[dim]notification sent[/dim]")
 
 
 @app.command("discover-js")
@@ -1391,6 +1795,256 @@ def show_js_files(
     """List JS files stored in the database."""
     effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_js_files(target, effective_limit, as_json))
+
+
+def _render_api_routes_table(rows: list[ApiRouteRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("method", style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("status", style="dim")
+    table.add_column("source", style="dim")
+    table.add_column("host", style="dim", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(
+            r.method,
+            r.url,
+            str(r.status_code) if r.status_code else "-",
+            r.source,
+            r.host,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_api_routes(
+    target_name: str | None,
+    host: str | None,
+    method: str | None,
+    source: str | None,
+    status_code: int | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_api_routes(
+            session, target_id, host=host, method=method, source=source, status_code=status_code, limit=limit
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "method": r.method,
+                        "status_code": r.status_code,
+                        "content_type": r.content_type,
+                        "source": r.source,
+                        "spec_url": r.spec_url,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no API routes found[/yellow]")
+        return
+
+    console.print(_render_api_routes_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("api-routes")
+def show_api_routes(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    method: str | None = typer.Option(None, "--method", help="Filter by HTTP method (GET, POST, etc.)."),
+    source: str | None = typer.Option(None, "--source", help="Filter by source (endpoints_passive, js_passive, etc.)."),
+    status_code: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List API routes discovered via passive pattern matching."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_api_routes(target, host, method, source, status_code, effective_limit, as_json))
+
+
+def _render_graphql_endpoints_table(rows: list[GraphqlEndpointRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("introspection", style="bold")
+    table.add_column("server", style="dim")
+    table.add_column("host", style="dim", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        introspection = "✓" if r.introspection_enabled else "✗"
+        table.add_row(
+            r.url,
+            introspection,
+            r.server_type or "-",
+            r.host,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_graphql_endpoints(
+    target_name: str | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_graphql_endpoints(session, target_id, host=host, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "introspection_enabled": r.introspection_enabled,
+                        "server_type": r.server_type,
+                        "schema_json": r.schema_json,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no GraphQL endpoints found[/yellow]")
+        return
+
+    console.print(_render_graphql_endpoints_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("graphql-endpoints")
+def show_graphql_endpoints(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List GraphQL endpoints with introspection and server type info."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_graphql_endpoints(target, host, effective_limit, as_json))
+
+
+def _render_api_specs_table(rows: list[ApiSpecRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("url", overflow="fold")
+    table.add_column("type", style="bold")
+    table.add_column("routes", style="dim", justify="right")
+    table.add_column("host", style="dim", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(
+            r.url,
+            r.spec_type,
+            str(r.routes_count),
+            r.host,
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_api_specs(
+    target_name: str | None,
+    host: str | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_api_specs(session, target_id, host=host, limit=limit)
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "url": r.url,
+                        "host": r.host,
+                        "spec_type": r.spec_type,
+                        "routes_count": r.routes_count,
+                        "raw_spec": r.raw_spec,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no OpenAPI specs found[/yellow]")
+        return
+
+    console.print(_render_api_specs_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("api-specs")
+def show_api_specs(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List OpenAPI/Swagger specs with extracted route counts."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_api_specs(target, host, effective_limit, as_json))
 
 
 def _render_tech_detections_table(rows: list[TechDetectionRow]) -> Table:
