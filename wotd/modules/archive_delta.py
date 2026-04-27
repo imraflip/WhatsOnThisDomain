@@ -44,7 +44,8 @@ class ArchiveDeltaModule(Module):
         if not urls:
             return {}
 
-        # Build httpx-pd command. httpx-pd supports -json output with status, content-type, title, body.
+        # Build httpx-pd command.
+        # httpx-pd supports -json output with status, content-type, title, body.
         result = await run_tool(
             "httpx-pd",
             [

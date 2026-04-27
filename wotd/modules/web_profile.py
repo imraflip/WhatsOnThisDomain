@@ -14,7 +14,6 @@ from wotd.modules.base import Module, ModuleResult
 from wotd.scope import Scope
 from wotd.store import (
     get_http_service_urls,
-    list_service_fingerprints,
     list_web_profiles,
     upsert_service_fingerprints,
     upsert_web_profiles,
@@ -36,7 +35,9 @@ class WebProfileModule(Module):
         super().__init__(session, target, scope)
 
     async def _compute_favicon_hash(self, favicon_path: str | None) -> str | None:
-        """Compute hash of favicon if available. For now returns None (placeholder for future icon fetching)."""
+        """Compute hash of favicon if available.
+        Placeholder for future icon fetching.
+        """
         return None
 
     async def _compute_body_hash(self, body: str) -> str:
@@ -282,9 +283,6 @@ class WebProfileModule(Module):
 
         # Compare against prior profiles for drift detection
         prior_profiles = await list_web_profiles(self.session, target_id=self.target.id, limit=None)
-        prior_fingerprints = await list_service_fingerprints(
-            self.session, target_id=self.target.id, limit=None
-        )
 
         # Count changes: URLs with different server, CSP/HSTS, or fingerprint hashes
         profile_changes = 0

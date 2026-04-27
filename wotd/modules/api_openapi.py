@@ -239,7 +239,7 @@ class ApiOpenApiModule(Module):
                             if resp_code == "200" and isinstance(resp_obj, dict):
                                 resp_content = resp_obj.get("content", {})
                                 if resp_content:
-                                    content_type = list(resp_content.keys())[0]
+                                    content_type = next(iter(resp_content.keys()))
                                 break
 
                     route_url = spec_url.rstrip("/") + path
