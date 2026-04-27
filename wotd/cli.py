@@ -24,6 +24,7 @@ from wotd.modules.subdomains_passive import SubdomainsPassiveModule
 from wotd.modules.subdomains_probe import SubdomainsProbeModule
 from wotd.modules.subdomains_resolve import SubdomainsResolveModule
 from wotd.modules.tech_detect import TechDetectModule
+from wotd.modules.vhost_enum import VhostEnumModule
 from wotd.modules.web_profile import WebProfileModule
 from wotd.notify import (
     NewHost,
@@ -48,6 +49,7 @@ from wotd.store import (
     ServiceFingerprintRow,
     SubdomainRow,
     TechDetectionRow,
+    VhostServiceRow,
     WebProfileRow,
     create_target,
     finish_scan_run,
@@ -61,8 +63,8 @@ from wotd.store import (
     list_api_specs,
     list_dir_results,
     list_endpoint_deltas,
-    list_graphql_endpoints,
     list_endpoints,
+    list_graphql_endpoints,
     list_interesting_endpoints,
     list_interesting_subdomains,
     list_js_endpoints,
@@ -71,6 +73,7 @@ from wotd.store import (
     list_service_fingerprints,
     list_subdomains,
     list_tech_detections,
+    list_vhost_services,
     list_web_profiles,
     start_scan_run,
     upsert_interesting_subdomains,
@@ -273,8 +276,7 @@ async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
         target = await get_target_by_name(session, target_name)
         if target is None:
             console.print(
-                f"[red]error:[/red] target {target_name!r} not found — "
-                "run wotd subdomains first"
+                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
             )
             raise typer.Exit(code=1)
 
@@ -925,7 +927,12 @@ async def _run_api_kiterunner(
 
         scan_run = await start_scan_run(session, target.id, ApiKiterunnerModule.name)
         module = ApiKiterunnerModule(
-            session, target, scope, skip_brute=skip_brute, skip_trpc=skip_trpc, force_trpc=force_trpc
+            session,
+            target,
+            scope,
+            skip_brute=skip_brute,
+            skip_trpc=skip_trpc,
+            force_trpc=force_trpc,
         )
         try:
             result = await module.run()
@@ -1126,8 +1133,7 @@ async def _run_dirbust_target(
         target = await get_target_by_name(session, target_name)
         if target is None:
             console.print(
-                f"[red]error:[/red] target {target_name!r} not found — "
-                "run wotd subdomains first"
+                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
             )
             raise SystemExit(1)
 
@@ -1163,25 +1169,17 @@ async def _run_dirbust_target(
 
         for svc_url in sorted(service_urls):
             scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
-            module = DirBruteModule(
-                session, target, scope, svc_url, tech_wordlists=tech_paths
-            )
+            module = DirBruteModule(session, target, scope, svc_url, tech_wordlists=tech_paths)
             try:
                 result = await module.run()
-                await finish_scan_run(
-                    session, scan_run, "completed", summary=result.stats
-                )
-                console.print(
-                    f"[green]dirbust[/green] {svc_url} {_meta(result.stats)}"
-                )
+                await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+                console.print(f"[green]dirbust[/green] {svc_url} {_meta(result.stats)}")
                 total_new += result.stats.get("new", 0)
                 total_changed += result.stats.get("changed", 0)
                 all_new_urls.extend(result.stats.get("new_urls", []))
                 all_changed_urls.extend(result.stats.get("changed_urls", []))
             except Exception as e:
-                await finish_scan_run(
-                    session, scan_run, "failed", summary={"error": str(e)}
-                )
+                await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
                 console.print(f"[yellow]dirbust {svc_url} failed: {e}[/yellow]")
 
     if is_first:
@@ -1215,7 +1213,8 @@ def dirbust(
         False, "--notify", help="Send notifications after bruteforcing finishes."
     ),
     tech: str | None = typer.Option(
-        None, "--tech",
+        None,
+        "--tech",
         help=(
             "Force an extra tech-specific wordlist pass on top of auto-tech "
             "(e.g. php, java, dotnet, apache, nginx, grafana, kubernetes)."
@@ -1245,6 +1244,170 @@ def dirbust(
         asyncio.run(_run_dirbust_target(target_or_url, notify, tech))
 
 
+async def _run_vhost_enum_target(
+    target_name: str,
+    notify: bool = False,
+    wordlist: Path | None = None,
+    max_candidates: int = 20000,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, target_name)
+        if target is None:
+            console.print(
+                f"[red]error:[/red] target {target_name!r} not found — "
+                "run wotd subdomains first"
+            )
+            raise typer.Exit(code=1)
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        service_urls = await get_http_service_urls(session, target.id)
+        if not service_urls:
+            console.print("[yellow]no live HTTP services found for this target[/yellow]")
+            return
+
+        is_first = not await has_prior_scan(session, target.id, VhostEnumModule.name)
+        scan_run = await start_scan_run(session, target.id, VhostEnumModule.name)
+        module = VhostEnumModule(
+            session,
+            target,
+            scope,
+            base_urls=service_urls,
+            candidate_wordlist=wordlist,
+            max_candidates=max_candidates,
+        )
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{VhostEnumModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    new_urls: list[str] = result.stats.get("new_urls", [])
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = f"[wotd] {target_name} vhost-enum — {new_count} new virtual host(s)"
+        if new_urls:
+            message += "\n\n" + "\n".join(new_urls[:8])
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+async def _run_vhost_enum_url(
+    url: str,
+    notify: bool = False,
+    wordlist: Path | None = None,
+    max_candidates: int = 20000,
+) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
+    await init_db()
+    session_factory = get_session_factory()
+
+    async with session_factory() as session:
+        target = await get_target_by_name(session, root)
+        if target is None:
+            target = await create_target(session, name=root, root_domains=[root])
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
+            ],
+        )
+
+        is_first = not await has_prior_scan(session, target.id, VhostEnumModule.name)
+        scan_run = await start_scan_run(session, target.id, VhostEnumModule.name)
+        module = VhostEnumModule(
+            session,
+            target,
+            scope,
+            base_urls=[url.rstrip("/")],
+            candidate_wordlist=wordlist,
+            max_candidates=max_candidates,
+        )
+        try:
+            result = await module.run()
+            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
+            console.print(f"[green]{VhostEnumModule.name}[/green] {_meta(result.stats)}")
+        except Exception as e:
+            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
+            raise
+
+    new_count = result.stats.get("new", 0)
+    new_urls: list[str] = result.stats.get("new_urls", [])
+    if is_first:
+        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
+    elif notify and new_count:
+        message = f"[wotd] {root} vhost-enum — {new_count} new virtual host(s)"
+        if new_urls:
+            message += "\n\n" + "\n".join(new_urls[:8])
+        sent = await dispatch(message)
+        if sent:
+            console.print("[dim]notification sent[/dim]")
+
+
+@app.command("vhost-enum")
+def vhost_enum(
+    target_or_url: str = typer.Argument(
+        ...,
+        help=(
+            "Target domain (e.g. acme.com) or full URL with scheme "
+            "(e.g. https://acme.com). Domain mode scans all live HTTP services "
+            "stored for that target; URL mode scans only the given service."
+        ),
+    ),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after vhost enumeration finishes."
+    ),
+    wordlist: Path | None = typer.Option(
+        None,
+        "--wordlist",
+        help="Optional newline-delimited vhost candidate file (labels or FQDNs).",
+    ),
+    max_candidates: int = typer.Option(
+        20000,
+        "--max-candidates",
+        min=1,
+        help="Maximum candidate hostnames per run after deduplication.",
+    ),
+) -> None:
+    """Enumerate host-header virtual hosts behind known live services."""
+    if wordlist is not None and not wordlist.exists():
+        console.print(f"[red]error:[/red] wordlist not found: {wordlist}")
+        raise typer.Exit(code=2)
+
+    if "://" in target_or_url:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(target_or_url)
+        if not parsed.scheme or not parsed.hostname:
+            console.print(
+                "[red]error:[/red] vhost-enum URL mode requires a valid URL "
+                "(e.g. https://acme.com)"
+            )
+            raise typer.Exit(code=2)
+        asyncio.run(_run_vhost_enum_url(target_or_url, notify, wordlist, max_candidates))
+    else:
+        asyncio.run(_run_vhost_enum_target(target_or_url, notify, wordlist, max_candidates))
+
+
 @app.command("api-passive")
 def api_passive(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
@@ -1267,9 +1430,7 @@ def api_kiterunner(
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
-    skip_brute: bool = typer.Option(
-        False, "--skip-brute", help="Skip kr brute (path-only) pass."
-    ),
+    skip_brute: bool = typer.Option(False, "--skip-brute", help="Skip kr brute (path-only) pass."),
     skip_trpc: bool = typer.Option(
         False, "--skip-trpc", help="Skip tRPC procedure probing via ffuf."
     ),
@@ -1325,7 +1486,8 @@ def api_discover(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
     skip: list[str] = typer.Option(
-        None, "--skip",
+        None,
+        "--skip",
         help="Skip a phase: passive, kiterunner, graphql, openapi (repeatable).",
     ),
     skip_brute: bool = typer.Option(
@@ -1393,7 +1555,13 @@ async def _run_api_discover(
         # Phase 2: api-kiterunner
         if "kiterunner" not in skip_phases:
             try:
-                await _run_api_kiterunner(target_name, notify=False, skip_brute=skip_brute, skip_trpc=skip_trpc, force_trpc=force_trpc)
+                await _run_api_kiterunner(
+                    target_name,
+                    notify=False,
+                    skip_brute=skip_brute,
+                    skip_trpc=skip_trpc,
+                    force_trpc=force_trpc,
+                )
                 is_first_overall = False
             except Exception as e:
                 all_errors.append(f"api-kiterunner: {e}")
@@ -1423,7 +1591,9 @@ async def _run_api_discover(
                 target = await get_target_by_name(session_for_counts, target_name)
                 if target:
                     route_rows = await list_api_routes(session_for_counts, target.id, limit=None)
-                    gql_rows = await list_graphql_endpoints(session_for_counts, target.id, limit=None)
+                    gql_rows = await list_graphql_endpoints(
+                        session_for_counts, target.id, limit=None
+                    )
                     spec_rows = await list_api_specs(session_for_counts, target.id, limit=None)
 
                     total_api_routes = len(route_rows)
@@ -1436,7 +1606,9 @@ async def _run_api_discover(
                             parts.append(f"{total_api_routes} API routes")
                         if total_graphql_endpoints:
                             gql_introspect = sum(1 for r in gql_rows if r.introspection_enabled)
-                            parts.append(f"{total_graphql_endpoints} GraphQL endpoints ({gql_introspect} introspectable)")
+                            parts.append(
+                                f"{total_graphql_endpoints} GraphQL endpoints ({gql_introspect} introspectable)"
+                            )
                         if total_specs:
                             parts.append(f"{total_specs} specs")
 
@@ -1455,7 +1627,8 @@ def discover_js(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
     bruteforce_js: bool = typer.Option(
-        False, "--bruteforce-js",
+        False,
+        "--bruteforce-js",
         help="Run ffuf against live HTTP services to find unlinked JS files.",
     ),
 ) -> None:
@@ -1511,9 +1684,11 @@ async def _run_web_profile(target_name: str, notify: bool = False) -> None:
             module = WebProfileModule(session, target, scope)
             result = await module.run()
 
-            await finish_scan_run(session, scan_run, status="completed", summary=_meta(result.stats))
+            await finish_scan_run(
+                session, scan_run, status="completed", summary=_meta(result.stats)
+            )
 
-            console.print(f"[bold]web-profile scan completed[/bold]")
+            console.print("[bold]web-profile scan completed[/bold]")
             console.print(format_cli_summary(result.stats))
 
             # Notify if requested and not first scan
@@ -1613,7 +1788,8 @@ def show_dir_results(
     status: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
     host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
     wordlist: str | None = typer.Option(
-        None, "--wordlist",
+        None,
+        "--wordlist",
         help="Filter by wordlist that found the path (e.g. httparchive_directories, tech_php).",
     ),
     since: str | None = typer.Option(
@@ -1641,6 +1817,120 @@ def show_dir_results(
 
     asyncio.run(
         _show_dir_results(target, since_td, status, host, wordlist, effective_limit, as_json)
+    )
+
+
+def _render_vhosts_table(rows: list[VhostServiceRow]) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("base url", overflow="fold")
+    table.add_column("vhost", overflow="fold")
+    table.add_column("status", justify="right")
+    table.add_column("length", justify="right")
+    table.add_column("title", overflow="fold")
+    table.add_column("first seen", style="dim")
+    for r in rows:
+        table.add_row(
+            r.base_url,
+            r.vhost,
+            str(r.status_code) if r.status_code is not None else "-",
+            str(r.content_length) if r.content_length is not None else "-",
+            r.title or "-",
+            r.first_seen_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+async def _show_vhosts(
+    target_name: str | None,
+    base_url: str | None,
+    host: str | None,
+    status_code: int | None,
+    since: timedelta | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_id: int | None = None
+        if target_name is not None:
+            target = await get_target_by_name(session, target_name)
+            if target is None:
+                console.print(f"[red]no target named {target_name!r} in the db[/red]")
+                raise typer.Exit(code=1)
+            target_id = target.id
+        rows = await list_vhost_services(
+            session,
+            target_id=target_id,
+            base_url=base_url,
+            vhost=host,
+            status_code=status_code,
+            since=since,
+            limit=limit,
+        )
+
+    if as_json:
+        print(
+            json_lib.dumps(
+                [
+                    {
+                        "base_url": r.base_url,
+                        "vhost": r.vhost,
+                        "url": r.url,
+                        "status_code": r.status_code,
+                        "title": r.title,
+                        "content_length": r.content_length,
+                        "first_seen_at": r.first_seen_at.isoformat(),
+                        "last_seen_at": r.last_seen_at.isoformat(),
+                    }
+                    for r in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not rows:
+        console.print("[yellow]no vhost services found[/yellow]")
+        return
+
+    console.print(_render_vhosts_table(rows))
+    console.print(f"[dim]{len(rows)} row(s)[/dim]")
+
+
+@show_app.command("vhosts")
+def show_vhosts(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    base_url: str | None = typer.Option(None, "--base-url", help="Filter by probed base URL."),
+    host: str | None = typer.Option(None, "--host", help="Filter by exact vhost."),
+    status: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
+    since: str | None = typer.Option(
+        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(
+        False, "--all", help="Ignore --since and --limit, show everything."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List discovered host-header virtual hosts."""
+    if all_rows:
+        since_td: timedelta | None = None
+        effective_limit: int | None = None
+    else:
+        since_td = None
+        if since:
+            try:
+                since_td = parse_duration(since)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(code=2) from e
+        effective_limit = None if limit == 0 else limit
+
+    asyncio.run(
+        _show_vhosts(target, base_url, host, status, since_td, effective_limit, as_json)
     )
 
 
@@ -1904,7 +2194,13 @@ async def _show_api_routes(
                 raise typer.Exit(code=1)
             target_id = target.id
         rows = await list_api_routes(
-            session, target_id, host=host, method=method, source=source, status_code=status_code, limit=limit
+            session,
+            target_id,
+            host=host,
+            method=method,
+            source=source,
+            status_code=status_code,
+            limit=limit,
         )
 
     if as_json:
@@ -1943,8 +2239,12 @@ def show_api_routes(
         None, help="Target domain. Omit to show across all targets."
     ),
     host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
-    method: str | None = typer.Option(None, "--method", help="Filter by HTTP method (GET, POST, etc.)."),
-    source: str | None = typer.Option(None, "--source", help="Filter by source (endpoints_passive, js_passive, etc.)."),
+    method: str | None = typer.Option(
+        None, "--method", help="Filter by HTTP method (GET, POST, etc.)."
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source (endpoints_passive, js_passive, etc.)."
+    ),
     status_code: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
@@ -1952,7 +2252,9 @@ def show_api_routes(
 ) -> None:
     """List API routes discovered via passive pattern matching."""
     effective_limit: int | None = None if all_rows or limit == 0 else limit
-    asyncio.run(_show_api_routes(target, host, method, source, status_code, effective_limit, as_json))
+    asyncio.run(
+        _show_api_routes(target, host, method, source, status_code, effective_limit, as_json)
+    )
 
 
 def _render_graphql_endpoints_table(rows: list[GraphqlEndpointRow]) -> Table:
@@ -2149,9 +2451,7 @@ async def _show_tech_detections(
                 console.print(f"[red]no target named {target_name!r} in the db[/red]")
                 raise typer.Exit(code=1)
             target_id = target.id
-        rows = await list_tech_detections(
-            session, target_id, tech=tech, url=url, limit=limit
-        )
+        rows = await list_tech_detections(session, target_id, tech=tech, url=url, limit=limit)
 
     if as_json:
         print(
@@ -2282,7 +2582,9 @@ async def _show_web_profiles(
                 console.print(f"[red]no target named {target_name!r} in the db[/red]")
                 raise typer.Exit(code=1)
             target_id = target.id
-        rows = await list_web_profiles(session, target_id=target_id, url=url, since=since, limit=limit)
+        rows = await list_web_profiles(
+            session, target_id=target_id, url=url, since=since, limit=limit
+        )
 
     if as_json:
         print(
@@ -2338,7 +2640,7 @@ def show_web_profiles(
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(code=2) from e
-    
+
     effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_web_profiles(target, url, since_td, effective_limit, as_json))
 
@@ -2381,7 +2683,9 @@ async def _show_service_fingerprints(
                 console.print(f"[red]no target named {target_name!r} in the db[/red]")
                 raise typer.Exit(code=1)
             target_id = target.id
-        rows = await list_service_fingerprints(session, target_id=target_id, url=url, since=since, limit=limit)
+        rows = await list_service_fingerprints(
+            session, target_id=target_id, url=url, since=since, limit=limit
+        )
 
     if as_json:
         print(
@@ -2431,7 +2735,7 @@ def show_service_fingerprints(
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(code=2) from e
-    
+
     effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_service_fingerprints(target, url, since_td, effective_limit, as_json))
 
@@ -2478,6 +2782,18 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --since 24h  found in the last day
   wotd show dir-results acme.com --json      raw json output
 
+[bold]Virtual host enumeration[/bold]
+  wotd vhost-enum acme.com                    probe all known live services with Host fuzzing
+  wotd vhost-enum https://acme.com            probe one specific service
+  wotd vhost-enum acme.com --wordlist hosts.txt  add candidate labels/FQDNs from file
+  wotd vhost-enum acme.com --notify           also dispatch notification on new vhosts
+  wotd show vhosts acme.com                   latest 25 discovered vhosts
+  wotd show vhosts acme.com --base-url https://app.acme.com  filter by base service
+  wotd show vhosts acme.com --host admin.acme.com  filter by exact vhost
+  wotd show vhosts acme.com --status 200      filter by HTTP status code
+  wotd show vhosts acme.com --all             every row, no limit
+  wotd show vhosts acme.com --json            raw json output
+
 [bold]Tech detections[/bold]
   wotd tech-detect acme.com                     re-run httpx -tech-detect on all live hosts
   wotd tech-detect acme.com --notify            also dispatch notification on new detections
@@ -2487,9 +2803,9 @@ _EXAMPLES = """\
   wotd show tech-detections acme.com --json     raw json output
 
 [bold]JS file discovery[/bold]
-  wotd discover-js acme.com                    collect JS files from endpoints + subjs
-  wotd discover-js acme.com --bruteforce-js    also ffuf every live host for unlinked JS
-  wotd discover-js acme.com --notify           also dispatch notification on new JS files
+  wotd discover-js https://acme.com            collect JS files from endpoints + subjs
+  wotd discover-js https://acme.com --bruteforce-js  also ffuf every live host for unlinked JS
+  wotd discover-js https://acme.com --notify   also dispatch notification on new JS files
   wotd show js-files acme.com           inspect downloaded JS files
 
 [bold]Notifications[/bold]
