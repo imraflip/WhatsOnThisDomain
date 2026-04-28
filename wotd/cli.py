@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json as json_lib
+import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any
+
+if TYPE_CHECKING:
+    DurationType = timedelta | None
+else:
+    DurationType = str | None
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,20 +104,96 @@ app = typer.Typer(
         "diffs against previous scans so new assets surface automatically."
     ),
     epilog=(
-        "**Examples:**\n\n"
-        "- `wotd subdomains acme.com` — passive + active + resolve + probe\n\n"
-        "- `wotd crawl https://acme.com` — crawl endpoints from all sources\n\n"
-        "- `wotd show subdomains acme.com` — inspect hosts stored in the db\n\n"
-        "- `wotd show endpoints acme.com` — inspect crawled endpoints\n\n"
-        "- `wotd examples` — full cheat-sheet"
+        "**Core Commands:**\n\n"
+        "- `sub-enum`, `sub-permute` — Subdomain discovery and resolution\n"
+        "- `web-crawl`, `dir-brute`, `js-discover` — Web surface exploration\n"
+        "- `web-fingerprint`, `tech-detect`, `web-screenshot` — Service analysis\n"
+        "- `api-discover` — Unified API surface mapping\n\n"
+        "**Show Commands (Data Inspection):**\n\n"
+        "- `show subdomains`, `show sub-candidates`, `show sub-interesting`\n"
+        "- `show endpoints`, `show web-interesting`, `show endpoint-deltas`\n"
+        "- `show js-files`, `show js-secrets`, `show js-endpoints`\n"
+        "- `show dir-results`, `show vhosts`, `show tech-detections`\n"
+        "- `show web-hashes`, `show web-screenshots`, `show web-fingerprints`\n"
+        "- `show api-routes`, `show api-specs`, `show graphql-endpoints`\n\n"
+        "Use `wotd <command> --help` for detailed options or `wotd examples` for a cheat-sheet."
     ),
     no_args_is_help=True,
-    add_completion=False,
+    add_completion=True,
     rich_markup_mode="markdown",
 )
 
 
 console = Console()
+
+
+def handle_errors(func):
+    """Global exception handler for CLI commands."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ToolNotFoundError as e:
+            console.print()
+            console.print(
+                Panel(
+                    f"{e}",
+                    title="[bold red]Tool Missing[/bold red]",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            raise typer.Exit(code=1)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Aborted by user.[/yellow]")
+            raise typer.Exit(code=130)
+        except Exception as e:
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]Error:[/bold] {e}",
+                    title="[bold red]Failure[/bold red]",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            raise typer.Exit(code=1)
+
+    return wrapper
+
+
+import ipaddress
+
+
+def validate_url(value: str) -> str:
+    """Ensure the value is a valid URL with a scheme."""
+    if not value:
+        return value
+    if "://" not in value:
+        raise typer.BadParameter("URL must include a scheme (e.g., https://acme.com)")
+    return value
+
+
+def validate_cidr(value: str | None) -> str | None:
+    """Ensure the value is a valid CIDR network."""
+    if value is None:
+        return None
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        raise typer.BadParameter(f"Invalid CIDR: {value}")
+    return value
+
+
+def validate_duration(value: str | None) -> timedelta | None:
+    """Ensure the value is a valid duration string and return a timedelta."""
+    if value is None:
+        return None
+    try:
+        return parse_duration(value)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
 
 
 def _meta(stats: dict) -> dict:  # type: ignore[type-arg]
@@ -261,7 +346,8 @@ async def _build_notify_payload(
     )
 
 
-@app.command()
+@app.command("sub-enum")
+@handle_errors
 def subdomains(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     notify: bool = typer.Option(
@@ -336,7 +422,8 @@ async def _run_subdomains_permute(
             console.print("[dim]notification sent[/dim]")
 
 
-@app.command("subdomains-permute")
+@app.command("sub-permute")
+@handle_errors
 def subdomains_permute(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     mode: str = typer.Option(
@@ -408,6 +495,7 @@ async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
 
 
 @app.command("tech-detect")
+@handle_errors
 def tech_detect(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     notify: bool = typer.Option(
@@ -486,7 +574,8 @@ async def _show_interesting_subdomains(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
-@show_app.command("interesting-subdomains")
+@show_app.command("sub-interesting")
+@handle_errors
 def show_interesting_subdomains(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -578,7 +667,8 @@ async def _show_subdomain_candidates(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
-@show_app.command("subdomain-candidates")
+@show_app.command("sub-candidates")
+@handle_errors
 def show_subdomain_candidates(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -587,8 +677,11 @@ def show_subdomain_candidates(
         None, "--status", help="Filter by candidate status (generated, resolved, unresolved)."
     ),
     source: str | None = typer.Option(None, "--source", help="Filter by source (e.g. alterx)."),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows generated within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows generated within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
@@ -600,13 +693,7 @@ def show_subdomain_candidates(
         since_td: timedelta | None = None
     else:
         effective_limit = None if limit == 0 else limit
-        since_td = None
-        if since:
-            try:
-                since_td = parse_duration(since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        since_td = since
 
     asyncio.run(
         _show_subdomain_candidates(
@@ -694,12 +781,16 @@ async def _show_subdomains(
 
 
 @show_app.command("subdomains")
+@handle_errors
 def show_subdomains(
     target: str | None = typer.Argument(
         None, help="Target domain (e.g. hackerone.com). Omit to show across all targets."
     ),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d, 2w)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d, 2w).",
+        callback=validate_duration,
     ),
     source: str | None = typer.Option(
         None, "--source", help="Filter by a specific source (e.g. subfinder, shuffledns)."
@@ -718,20 +809,12 @@ def show_subdomains(
     Defaults to probed hosts only (HTTP data available). Use --include-unprobed
     to also show DNS-only results. Omit TARGET to query across all targets.
     """
-    since_td: timedelta | None
     effective_limit: int | None
     if all_rows:
         since_td = None
         effective_limit = None
     else:
-        if since is None:
-            since_td = None
-        else:
-            try:
-                since_td = parse_duration(since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        since_td = since
         effective_limit = None if limit == 0 else limit
 
     asyncio.run(
@@ -803,12 +886,16 @@ async def _show_endpoints(
 
 
 @show_app.command("endpoints")
+@handle_errors
 def show_endpoints(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
     ),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     source: str | None = typer.Option(
         None, "--source", help="Filter by source tool (e.g. gau, katana)."
@@ -825,13 +912,7 @@ def show_endpoints(
         since_td: timedelta | None = None
         effective_limit: int | None = None
     else:
-        since_td = None
-        if since:
-            try:
-                since_td = parse_duration(since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        since_td = since
         effective_limit = None if limit == 0 else limit
 
     asyncio.run(_show_endpoints(target, since_td, source, host, effective_limit, as_json))
@@ -895,7 +976,8 @@ async def _show_interesting_endpoints(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
-@show_app.command("interesting-endpoints")
+@show_app.command("web-interesting")
+@handle_errors
 def show_interesting_endpoints(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -963,9 +1045,12 @@ async def _run_crawl(url: str, notify: bool = False) -> None:
             console.print("[dim]notification sent[/dim]")
 
 
-@app.command()
+@app.command("web-crawl")
+@handle_errors
 def crawl(
-    url: str = typer.Argument(..., help="Full URL including scheme (e.g. https://acme.com)"),
+    url: str = typer.Argument(
+        ..., help="Full URL including scheme (e.g. https://acme.com)", callback=validate_url
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the crawl finishes."
     ),
@@ -975,11 +1060,6 @@ def crawl(
     Runs passive and active crawlers against the target, deduplicates discovered
     URLs, and stores new endpoints in the local database.
     """
-    if "://" not in url:
-        console.print(
-            "[red]error:[/red] crawl requires a full URL with scheme (e.g. https://acme.com)"
-        )
-        raise typer.Exit(code=2)
     asyncio.run(_run_crawl(url, notify))
 
 
@@ -1414,7 +1494,8 @@ async def _run_dirbust_target(
             console.print("[dim]notification sent[/dim]")
 
 
-@app.command("dirbust")
+@app.command("dir-brute")
+@handle_errors
 def dirbust(
     target_or_url: str = typer.Argument(
         ...,
@@ -1578,6 +1659,7 @@ async def _run_vhost_enum_url(
 
 
 @app.command("vhost-enum")
+@handle_errors
 def vhost_enum(
     target_or_url: str = typer.Argument(
         ...,
@@ -1622,111 +1704,53 @@ def vhost_enum(
         asyncio.run(_run_vhost_enum_target(target_or_url, notify, wordlist, max_candidates))
 
 
-@app.command("api-passive")
-def api_passive(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
-    notify: bool = typer.Option(
-        False, "--notify", help="Send notifications after the scan finishes."
-    ),
-) -> None:
-    """Extract passive API surface from existing endpoints + JS endpoints.
-
-    Reads previously discovered URLs from the endpoints and js_endpoints tables
-    and pattern-matches anything that looks like an API route. No tool runs,
-    no network — purely a database transformation. Results upserted into api_routes.
-    """
-    asyncio.run(_run_api_passive(target, notify))
-
-
-@app.command("api-kiterunner")
-def api_kiterunner(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
-    notify: bool = typer.Option(
-        False, "--notify", help="Send notifications after the scan finishes."
-    ),
-    skip_brute: bool = typer.Option(False, "--skip-brute", help="Skip kr brute (path-only) pass."),
-    skip_trpc: bool = typer.Option(
-        False, "--skip-trpc", help="Skip tRPC procedure probing via ffuf."
-    ),
-    force_trpc: bool = typer.Option(
-        False, "--force-trpc", help="Force tRPC probing even if no trpc_passive routes found."
-    ),
-) -> None:
-    """Run active API route discovery against live HTTP services.
-
-    Runs three passes: kr scan (method-aware, primary), kr brute (path-only),
-    and tRPC probe via ffuf (only if trpc_passive routes detected or --force-trpc).
-    Requires prior subdomains scan to populate http_services table.
-    """
-    asyncio.run(_run_api_kiterunner(target, notify, skip_brute, skip_trpc, force_trpc))
-
-
-@app.command("api-graphql")
-def api_graphql(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
-    notify: bool = typer.Option(
-        False, "--notify", help="Send notifications after the scan finishes."
-    ),
-) -> None:
-    """Detect GraphQL endpoints, enable introspection, extract routes, and fingerprint servers.
-
-    Runs ffuf against live HTTP services with common GraphQL paths, attempts introspection
-    queries to extract schema and routes, and fingerprints the GraphQL implementation
-    (Apollo, Hasura, AWS AppSync, etc.) via graphw00f.
-    """
-    asyncio.run(_run_api_graphql(target, notify))
-
-
-@app.command("api-openapi")
-def api_openapi(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
-    notify: bool = typer.Option(
-        False, "--notify", help="Send notifications after the scan finishes."
-    ),
-) -> None:
-    """Harvest OpenAPI/Swagger specs and extract API routes.
-
-    Discovers spec files via ffuf with common paths, validates and parses them,
-    extracts routes, and cross-validates with sj for additional routes captured
-    via $ref resolution and parameterized-path expansion.
-    """
-    asyncio.run(_run_api_openapi(target, notify))
-
-
 @app.command("api-discover")
+@handle_errors
 def api_discover(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
-    skip: list[str] = typer.Option(
+    method: list[str] = typer.Option(
         None,
-        "--skip",
-        help="Skip a phase: passive, kiterunner, graphql, openapi (repeatable).",
+        "--method",
+        help="Specific discovery methods to run: passive, active, gql, spec (repeatable). Defaults to all.",
     ),
     skip_brute: bool = typer.Option(
-        False, "--skip-brute", help="Skip kr brute pass (applies to api-kiterunner)."
+        False, "--skip-brute", help="Skip kr brute pass (applies to active pass)."
     ),
     skip_trpc: bool = typer.Option(
-        False, "--skip-trpc", help="Skip tRPC probing (applies to api-kiterunner)."
+        False, "--skip-trpc", help="Skip tRPC probing (applies to active pass)."
     ),
     force_trpc: bool = typer.Option(
-        False, "--force-trpc", help="Force tRPC probing (applies to api-kiterunner)."
+        False, "--force-trpc", help="Force tRPC probing (applies to active pass)."
     ),
 ) -> None:
     """Master command orchestrating all API discovery phases.
 
-    Runs api-passive → api-kiterunner → api-graphql → api-openapi in sequence.
+    Runs passive → active (kiterunner) → gql (graphql) → spec (openapi) in sequence.
     Each phase wrapped in try/except so a missing tool doesn't abort the rest.
-    Use --skip to disable individual phases (repeatable). Sub-pass flags forwarded
-    to api-kiterunner.
+    Use --method to enable specific phases (repeatable). Sub-pass flags forwarded
+    to active pass.
     """
-    skip_phases = set(skip) if skip else set()
+    valid_methods = {"passive", "active", "gql", "spec"}
+    if method:
+        for m in method:
+            if m not in valid_methods:
+                console.print(
+                    f"[red]error:[/red] invalid method {m!r}. "
+                    f"Must be one of: {', '.join(sorted(valid_methods))}"
+                )
+                raise typer.Exit(code=2)
+        active_methods = set(method)
+    else:
+        active_methods = valid_methods
+
     asyncio.run(
         _run_api_discover(
             target,
             notify,
-            skip_phases,
+            active_methods,
             skip_brute,
             skip_trpc,
             force_trpc,
@@ -1737,7 +1761,7 @@ def api_discover(
 async def _run_api_discover(
     target_name: str,
     notify: bool,
-    skip_phases: set[str],
+    active_methods: set[str],
     skip_brute: bool = False,
     skip_trpc: bool = False,
     force_trpc: bool = False,
@@ -1752,22 +1776,19 @@ async def _run_api_discover(
             target = await create_target(session, name=target_name, root_domains=[target_name])
 
         is_first_overall = True
-        total_api_routes = 0
-        total_graphql_endpoints = 0
-        total_specs = 0
         all_errors = []
 
-        # Phase 1: api-passive
-        if "passive" not in skip_phases:
+        # Phase 1: passive
+        if "passive" in active_methods:
             try:
                 await _run_api_passive(target_name, notify=False)
                 is_first_overall = False
             except Exception as e:
-                all_errors.append(f"api-passive: {e}")
+                all_errors.append(f"passive: {e}")
                 console.print(f"[yellow]api-passive warning: {e}[/yellow]")
 
-        # Phase 2: api-kiterunner
-        if "kiterunner" not in skip_phases:
+        # Phase 2: active (kiterunner)
+        if "active" in active_methods:
             try:
                 await _run_api_kiterunner(
                     target_name,
@@ -1778,25 +1799,25 @@ async def _run_api_discover(
                 )
                 is_first_overall = False
             except Exception as e:
-                all_errors.append(f"api-kiterunner: {e}")
+                all_errors.append(f"active: {e}")
                 console.print(f"[yellow]api-kiterunner warning: {e}[/yellow]")
 
-        # Phase 3: api-graphql
-        if "graphql" not in skip_phases:
+        # Phase 3: gql (graphql)
+        if "gql" in active_methods:
             try:
                 await _run_api_graphql(target_name, notify=False)
                 is_first_overall = False
             except Exception as e:
-                all_errors.append(f"api-graphql: {e}")
+                all_errors.append(f"gql: {e}")
                 console.print(f"[yellow]api-graphql warning: {e}[/yellow]")
 
-        # Phase 4: api-openapi
-        if "openapi" not in skip_phases:
+        # Phase 4: spec (openapi)
+        if "spec" in active_methods:
             try:
                 await _run_api_openapi(target_name, notify=False)
                 is_first_overall = False
             except Exception as e:
-                all_errors.append(f"api-openapi: {e}")
+                all_errors.append(f"spec: {e}")
                 console.print(f"[yellow]api-openapi warning: {e}[/yellow]")
 
         # Unified notification
@@ -1835,9 +1856,14 @@ async def _run_api_discover(
                             console.print("[dim]notification sent[/dim]")
 
 
-@app.command("discover-js")
+@app.command("js-discover")
+@handle_errors
 def discover_js(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    target: str = typer.Argument(
+        ...,
+        help="Full target URL including scheme (e.g. https://acme.com)",
+        callback=validate_url,
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
@@ -1853,15 +1879,11 @@ def discover_js(
     against the provided URL. With --bruteforce-js, also runs ffuf against
     every live HTTP service using httparchive_js.txt to surface unlinked files.
     """
-    if "://" not in target:
-        console.print(
-            "[red]error:[/red] discover-js requires a full URL with scheme (e.g. https://acme.com)"
-        )
-        raise typer.Exit(code=2)
     asyncio.run(_run_discover_js(target, notify, bruteforce_js))
 
 
-@app.command("web-profile")
+@app.command("web-fingerprint")
+@handle_errors
 def web_profile(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     notify: bool = typer.Option(
@@ -1926,7 +1948,8 @@ async def _run_web_profile(target_name: str, notify: bool = False) -> None:
             raise typer.Exit(code=1) from e
 
 
-@app.command("visual-surface")
+@app.command("web-screenshot")
+@handle_errors
 def visual_surface(
     target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
     notify: bool = typer.Option(
@@ -2070,6 +2093,7 @@ async def _show_dir_results(
 
 
 @show_app.command("dir-results")
+@handle_errors
 def show_dir_results(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2081,8 +2105,11 @@ def show_dir_results(
         "--wordlist",
         help="Filter by wordlist that found the path (e.g. httparchive_directories, tech_php).",
     ),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(
@@ -2095,13 +2122,7 @@ def show_dir_results(
         since_td: timedelta | None = None
         effective_limit: int | None = None
     else:
-        since_td = None
-        if since:
-            try:
-                since_td = parse_duration(since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        since_td = since
         effective_limit = None if limit == 0 else limit
 
     asyncio.run(
@@ -2188,6 +2209,7 @@ async def _show_vhosts(
 
 
 @show_app.command("vhosts")
+@handle_errors
 def show_vhosts(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2195,8 +2217,11 @@ def show_vhosts(
     base_url: str | None = typer.Option(None, "--base-url", help="Filter by probed base URL."),
     host: str | None = typer.Option(None, "--host", help="Filter by exact vhost."),
     status: int | None = typer.Option(None, "--status", help="Filter by HTTP status code."),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(
@@ -2209,13 +2234,7 @@ def show_vhosts(
         since_td: timedelta | None = None
         effective_limit: int | None = None
     else:
-        since_td = None
-        if since:
-            try:
-                since_td = parse_duration(since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        since_td = since
         effective_limit = None if limit == 0 else limit
 
     asyncio.run(_show_vhosts(target, base_url, host, status, since_td, effective_limit, as_json))
@@ -2332,6 +2351,7 @@ async def _show_js_endpoints(
 
 
 @show_app.command("js-endpoints")
+@handle_errors
 def show_js_endpoints(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2412,6 +2432,7 @@ async def _show_js_secrets(
 
 
 @show_app.command("js-secrets")
+@handle_errors
 def show_js_secrets(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2428,6 +2449,7 @@ def show_js_secrets(
 
 
 @show_app.command("js-files")
+@handle_errors
 def show_js_files(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2521,6 +2543,7 @@ async def _show_api_routes(
 
 
 @show_app.command("api-routes")
+@handle_errors
 def show_api_routes(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2610,6 +2633,7 @@ async def _show_graphql_endpoints(
 
 
 @show_app.command("graphql-endpoints")
+@handle_errors
 def show_graphql_endpoints(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2689,6 +2713,7 @@ async def _show_api_specs(
 
 
 @show_app.command("api-specs")
+@handle_errors
 def show_api_specs(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
@@ -2767,6 +2792,23 @@ async def _show_tech_detections(
     console.print(f"[dim]{len(rows)} row(s)[/dim]")
 
 
+@show_app.command("tech-detections")
+@handle_errors
+def show_tech_detections(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    tech: str | None = typer.Option(None, "--tech", help="Filter by tech name (e.g. PHP, Nginx)."),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact URL."),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List identified technologies across live HTTP services."""
+    effective_limit: int | None = None if all_rows or limit == 0 else limit
+    asyncio.run(_show_tech_detections(target, tech, url, effective_limit, as_json))
+
+
 def _render_endpoint_deltas_table(rows: list[EndpointDeltaRow]) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("url", overflow="fold")
@@ -2827,6 +2869,34 @@ async def _show_endpoint_deltas(
 
     console.print(_render_endpoint_deltas_table(rows))
     console.print(f"[dim]{len(rows)} change(s)[/dim]")
+
+
+@show_app.command("endpoint-deltas")
+@handle_errors
+def show_endpoint_deltas(
+    target: str | None = typer.Argument(
+        None, help="Target domain. Omit to show across all targets."
+    ),
+    kind: str | None = typer.Option(None, "--kind", help="Filter by change kind (status, title)."),
+    url: str | None = typer.Option(None, "--url", help="Filter by exact URL."),
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
+    ),
+    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
+    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List historical changes to HTTP services (status code, title, etc.)."""
+    if all_rows:
+        since_td = None
+        effective_limit = None
+    else:
+        since_td = since
+        effective_limit = None if limit == 0 else limit
+    asyncio.run(_show_endpoint_deltas(target, kind, url, since_td, effective_limit, as_json))
 
 
 def _render_web_profiles_table(rows: list[WebProfileRow]) -> Table:
@@ -2906,29 +2976,31 @@ async def _show_web_profiles(
     console.print(f"[dim]{len(rows)} profile(s)[/dim]")
 
 
-@show_app.command("web-profiles")
+@show_app.command("web-fingerprints")
+@handle_errors
 def show_web_profiles(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
     ),
     url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
     as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
 ) -> None:
     """List HTTP metadata profiles with security headers and posture."""
-    since_td: timedelta | None = None
-    if since:
-        try:
-            since_td = parse_duration(since)
-        except ValueError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(code=2) from e
+    if all_rows:
+        since_td = None
+        effective_limit = None
+    else:
+        since_td = since
+        effective_limit = None if limit == 0 else limit
 
-    effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_web_profiles(target, url, since_td, effective_limit, as_json))
 
 
@@ -3001,14 +3073,18 @@ async def _show_service_fingerprints(
     console.print(f"[dim]{len(rows)} fingerprint(s)[/dim]")
 
 
-@show_app.command("service-fingerprints")
+@show_app.command("web-hashes")
+@handle_errors
 def show_service_fingerprints(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
     ),
     url: str | None = typer.Option(None, "--url", help="Filter by exact endpoint URL."),
-    since: str | None = typer.Option(
-        None, "--since", help="Only rows first seen within this window (e.g. 24h, 7d)."
+    since: DurationType = typer.Option(
+        None,
+        "--since",
+        help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
@@ -3016,14 +3092,12 @@ def show_service_fingerprints(
 ) -> None:
     """List service fingerprints with content hashes."""
     since_td: timedelta | None = None
-    if since:
-        try:
-            since_td = parse_duration(since)
-        except ValueError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(code=2) from e
+    if all_rows:
+        effective_limit = None
+    else:
+        since_td = since
+        effective_limit = None if limit == 0 else limit
 
-    effective_limit: int | None = None if all_rows or limit == 0 else limit
     asyncio.run(_show_service_fingerprints(target, url, since_td, effective_limit, as_json))
 
 
@@ -3103,17 +3177,19 @@ async def _show_service_screenshots(
     console.print(f"[dim]{len(rows)} screenshot(s)[/dim]")
 
 
-@show_app.command("service-screenshots")
+@show_app.command("web-screenshots")
+@handle_errors
 def show_service_screenshots(
     target: str | None = typer.Argument(
         None, help="Target domain. Omit to show across all targets."
     ),
     host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
     url: str | None = typer.Option(None, "--url", help="Filter by exact service URL."),
-    changed_since: str | None = typer.Option(
+    changed_since: DurationType = typer.Option(
         None,
         "--changed-since",
         help="Only rows first seen within this window (e.g. 24h, 7d).",
+        callback=validate_duration,
     ),
     limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
     all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
@@ -3125,13 +3201,7 @@ def show_service_screenshots(
         effective_limit: int | None = None
     else:
         effective_limit = None if limit == 0 else limit
-        changed_since_td = None
-        if changed_since:
-            try:
-                changed_since_td = parse_duration(changed_since)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(code=2) from e
+        changed_since_td = changed_since
 
     asyncio.run(
         _show_service_screenshots(
@@ -3147,12 +3217,12 @@ def show_service_screenshots(
 
 _EXAMPLES = """\
 [bold]Subdomain enumeration[/bold]
-  wotd subdomains acme.com               full pipeline (passive → active → resolve → probe)
-  wotd subdomains acme.com --notify      also dispatch discord / smtp notification
+  wotd sub-enum acme.com                 full pipeline (passive → active → resolve → probe)
+  wotd sub-enum acme.com --notify        also dispatch discord / smtp notification
 
 [bold]Crawl endpoints[/bold]
-  wotd crawl https://acme.com            passive + active crawlers, stores new endpoints
-  wotd crawl https://acme.com --notify   also dispatch notification on new endpoints
+  wotd web-crawl https://acme.com        passive + active crawlers, stores new endpoints
+  wotd web-crawl https://acme.com --notify  also dispatch notification on new endpoints
 
 [bold]Inspect subdomains[/bold]
   wotd show subdomains acme.com                    probed hosts, last 25
@@ -3176,10 +3246,10 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dirbust acme.com                      scan all live HTTP services + auto-tech passes
-  wotd dirbust https://acme.com              scan only this URL + auto-tech passes
-  wotd dirbust acme.com --tech grafana       force a specific tech pass on top of auto-tech
-  wotd dirbust acme.com --notify             also dispatch notification on new/changed paths
+  wotd dir-brute acme.com                    scan all live HTTP services + auto-tech passes
+  wotd dir-brute https://acme.com            scan only this URL + auto-tech passes
+  wotd dir-brute acme.com --tech grafana     force a specific tech pass on top of auto-tech
+  wotd dir-brute acme.com --notify           also dispatch notification on new/changed paths
   wotd show dir-results acme.com             latest 25 results
   wotd show dir-results acme.com --all       every result, no limit
   wotd show dir-results acme.com --status 200  filter by status code
@@ -3188,16 +3258,16 @@ _EXAMPLES = """\
   wotd show dir-results acme.com --json      raw json output
 
 [bold]Subdomain permutation[/bold]
-  wotd subdomains-permute acme.com                  generate and resolve target-aware mutations
-  wotd subdomains-permute acme.com --mode quick     run the fast permutation profile
-  wotd subdomains-permute acme.com --mode deep      run the larger enriched profile
-  wotd subdomains-permute acme.com --max-candidates 5000  cap candidate volume
-  wotd subdomains-permute acme.com --budget-minutes 15    cap runtime budget
-  wotd subdomains-permute acme.com --notify         also dispatch notification on new resolved hosts
-  wotd show subdomain-candidates acme.com           latest generated candidates
-  wotd show subdomain-candidates acme.com --status resolved  only resolved candidates
-  wotd show subdomain-candidates acme.com --all     every row, no limit
-  wotd show subdomain-candidates acme.com --json    raw json output
+  wotd sub-permute acme.com                         generate and resolve target-aware mutations
+  wotd sub-permute acme.com --mode quick            run the fast permutation profile
+  wotd sub-permute acme.com --mode deep             run the larger enriched profile
+  wotd sub-permute acme.com --max-candidates 5000   cap candidate volume
+  wotd sub-permute acme.com --budget-minutes 15     cap runtime budget
+  wotd sub-permute acme.com --notify                also dispatch notification on new resolved hosts
+  wotd show sub-candidates acme.com                 latest generated candidates
+  wotd show sub-candidates acme.com --status resolved  only resolved candidates
+  wotd show sub-candidates acme.com --all           every row, no limit
+  wotd show sub-candidates acme.com --json          raw json output
 
 [bold]Virtual host enumeration[/bold]
   wotd vhost-enum acme.com                    probe all known live services with Host fuzzing
@@ -3219,28 +3289,36 @@ _EXAMPLES = """\
   wotd show tech-detections acme.com --tech PHP filter by tech name
   wotd show tech-detections acme.com --json     raw json output
 
-[bold]Visual surface[/bold]
-  wotd visual-surface acme.com                  capture screenshots for live HTTP services
-  wotd visual-surface acme.com --phash-threshold 12  tune visual drift sensitivity
-  wotd visual-surface acme.com --notify         also dispatch notification on visual changes
-  wotd show service-screenshots acme.com        latest screenshot rows
-  wotd show service-screenshots acme.com --host app.acme.com  filter by host
-  wotd show service-screenshots acme.com --changed-since 24h  only recent screenshot rows
-  wotd show service-screenshots acme.com --json raw json output
+[bold]Web screenshots[/bold]
+  wotd web-screenshot acme.com                  capture screenshots for live HTTP services
+  wotd web-screenshot acme.com --phash-threshold 12  tune visual drift sensitivity
+  wotd web-screenshot acme.com --notify         also dispatch notification on visual changes
+  wotd show web-screenshots acme.com            latest screenshot rows
+  wotd show web-screenshots acme.com --host app.acme.com  filter by host
+  wotd show web-screenshots acme.com --changed-since 24h  only recent screenshot rows
+  wotd show web-screenshots acme.com --json raw json output
 
 [bold]JS file discovery[/bold]
-  wotd discover-js https://acme.com            collect JS files from endpoints + subjs
-  wotd discover-js https://acme.com --bruteforce-js  also ffuf every live host for unlinked JS
-  wotd discover-js https://acme.com --notify   also dispatch notification on new JS files
+  wotd js-discover https://acme.com             collect JS files from endpoints + subjs
+  wotd js-discover https://acme.com --bruteforce-js  also ffuf every live host for unlinked JS
+  wotd js-discover https://acme.com --notify    also dispatch notification on new JS files
   wotd show js-files acme.com           inspect downloaded JS files
+
+[bold]API Discovery[/bold]
+  wotd api-discover acme.com                    run all API discovery phases (passive, active, gql, spec)
+  wotd api-discover acme.com --method gql       run only GraphQL discovery
+  wotd api-discover acme.com --method passive --method active  run only passive and active passes
+  wotd show api-routes acme.com                 list all discovered API routes
+  wotd show graphql-endpoints acme.com          list all GraphQL endpoints found
+  wotd show web-interesting acme.com            list endpoints flagged by patterns
 
 [bold]Notifications[/bold]
   set WOTD_NOTIFY_DISCORD_WEBHOOK_URL in .env, then pass --notify
   set WOTD_NOTIFY_SMTP_* vars for email delivery
 """
 
-
-@app.command()
+@app.command("examples")
+@app.command("cheat-sheet")
 def examples() -> None:
     """Print a cheat-sheet of common commands."""
     console.print(_EXAMPLES)

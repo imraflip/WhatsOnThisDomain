@@ -62,9 +62,13 @@ RUN go install github.com/sensepost/gowitness@latest
 # kr (kiterunner): method-aware REST API route bruteforcer; .kite corpus replays the right verb
 # sj: BishopFox Swagger Jacker — extracts endpoints from OpenAPI/Swagger specs with $ref support
 # graphw00f: GraphQL implementation fingerprinter (Apollo, Hasura, AWS AppSync, etc.)
-RUN go install github.com/assetnote/kiterunner/cmd/kr@latest \
+RUN go install github.com/assetnote/kiterunner/cmd/kiterunner@latest \
+    && mv /root/go/bin/kiterunner /root/go/bin/kr \
     && go install github.com/BishopFox/sj@latest \
-    && pip install --no-cache-dir graphw00f
+    && git clone --depth 1 https://github.com/dolevf/graphw00f.git /opt/graphw00f \
+    && echo '#!/bin/bash' > /usr/local/bin/graphw00f \
+    && echo 'exec python /opt/graphw00f/main.py "$@"' >> /usr/local/bin/graphw00f \
+    && chmod +x /usr/local/bin/graphw00f
 
 # gf pattern matching — install binary + community patterns + custom wotd patterns into ~/.gf
 RUN go install github.com/tomnomnom/gf@latest \
@@ -164,8 +168,8 @@ RUN set -e; \
 # API discovery wordlists: kiterunner method-aware corpus + curated path lists for
 # GraphQL endpoint discovery, OpenAPI/Swagger spec discovery, and tRPC procedure probing.
 # Path lists are stored without leading slashes since ffuf templates URLs as <url>/FUZZ.
-RUN curl -fsSL https://wordlists.assetnote.io/data/kiterunner/routes-large.kite \
-        -o /opt/wotd/wordlists/routes-large.kite \
+RUN curl -fsSL https://wordlists-cdn.assetnote.io/data/kiterunner/routes-large.kite.tar.gz \
+        | tar -xz -C /opt/wotd/wordlists/ \
     && printf '%s\n' \
         graphql api/graphql graphiql query gql playground console explorer \
         api/v1/graphql api/v2/graphql graph graphql/v1 graphql/v2 \
