@@ -19,8 +19,22 @@ from wotd.tools import ToolNotFoundError, run_tool
 class TechDetectModule(Module):
     name = "tech_detect"
 
+    def __init__(
+        self,
+        session: AsyncSession,
+        target: Target,
+        scope: Scope,
+        single_url: str | None = None,
+    ) -> None:
+        super().__init__(session, target, scope)
+        self.single_url = single_url
+
     async def run(self) -> ModuleResult:
-        urls = await get_http_service_urls(self.session, self.target.id)
+        if self.single_url:
+            urls = [self.single_url]
+        else:
+            urls = await get_http_service_urls(self.session, self.target.id)
+
         if not urls:
             return ModuleResult(
                 module=self.name,

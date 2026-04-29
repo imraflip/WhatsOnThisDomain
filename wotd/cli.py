@@ -454,32 +454,35 @@ def subdomains_permute(
     asyncio.run(_run_subdomains_permute(target, mode, max_candidates, budget_minutes, notify))
 
 
-async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
+async def _run_tech_detect(url: str, notify: bool = False) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
     await init_db()
     session_factory = get_session_factory()
     async with session_factory() as session:
-        target = await get_target_by_name(session, target_name)
+        target = await get_target_by_name(session, root)
         if target is None:
-            console.print(
-                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
-            )
-            raise typer.Exit(code=1)
+            target = await create_target(session, name=root, root_domains=[root])
 
         scope = Scope(
             includes=[
-                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
-                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
             ],
         )
 
         is_first = not await has_prior_scan(session, target.id, TechDetectModule.name)
 
         scan_run = await start_scan_run(session, target.id, TechDetectModule.name)
-        module = TechDetectModule(session, target, scope)
+        module = TechDetectModule(session, target, scope, single_url=url)
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-            console.print(f"[green]{TechDetectModule.name}[/green] {_meta(result.stats)}")
+            console.print(f"[green]{TechDetectModule.name}[/green] {url}")
         except Exception as e:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
@@ -488,29 +491,26 @@ async def _run_tech_detect(target_name: str, notify: bool = False) -> None:
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
     elif notify and new_count:
-        message = f"[wotd] {target_name} tech-detect — {new_count} new tech detections"
+        message = f"[wotd] {root} tech-detect — {new_count} new tech detections"
         sent = await dispatch(message)
         if sent:
-            console.print("[dim]notification sent[/dim]")
+            console_print("[dim]notification sent[/dim]")
 
 
 @app.command("tech-detect")
 @handle_errors
 def tech_detect(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    url: str = typer.Argument(
+        ...,
+        help="Full target URL with scheme (e.g. https://acme.com).",
+        callback=validate_url,
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
 ) -> None:
-    """Re-detect technologies on all live HTTP services for a target.
-
-    Runs httpx-pd with -tech-detect against every URL stored in http_services and
-    upserts findings into tech_detections, populating wordlist_key for techs
-    that have a mapped wordlist (PHP, Java, Apache, Nginx, etc.). Use after
-    subdomains to get fresher data — subdomains only probes newly-found hosts.
-    """
-    asyncio.run(_run_tech_detect(target, notify))
-
+    """Re-detect technologies on a target URL."""
+    asyncio.run(_run_tech_detect(url, notify))
 
 show_app = typer.Typer(
     name="show",
@@ -1416,94 +1416,13 @@ async def _run_dirbust(url: str, notify: bool = False, tech: str | None = None) 
         if sent:
             console.print("[dim]notification sent[/dim]")
 
-
-async def _run_dirbust_target(
-    target_name: str, notify: bool = False, tech: str | None = None
-) -> None:
-    from wotd.modules.dirbust import DirBruteModule
-
-    await init_db()
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        target = await get_target_by_name(session, target_name)
-        if target is None:
-            console.print(
-                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
-            )
-            raise SystemExit(1)
-
-        scope = Scope(
-            includes=[
-                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
-                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
-            ],
-        )
-
-        service_urls = await get_http_service_urls(session, target.id)
-        if not service_urls:
-            console.print("[yellow]no live HTTP services found for this target[/yellow]")
-            return
-
-        tech_paths, auto_keys, has_detections = await _resolve_tech_wordlists(
-            session, target.id, tech
-        )
-        if auto_keys:
-            console.print(f"[dim][auto-tech] {' '.join(auto_keys)}[/dim]")
-        elif tech is None and not has_detections:
-            console.print(
-                "[dim]no tech detections — "
-                "run `wotd tech-detect` first for tech-specific passes[/dim]"
-            )
-
-        is_first = not await has_prior_scan(session, target.id, DirBruteModule.name)
-
-        total_new = 0
-        total_changed = 0
-        all_new_urls: list[str] = []
-        all_changed_urls: list[str] = []
-
-        for svc_url in sorted(service_urls):
-            scan_run = await start_scan_run(session, target.id, DirBruteModule.name)
-            module = DirBruteModule(session, target, scope, svc_url, tech_wordlists=tech_paths)
-            try:
-                result = await module.run()
-                await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-                console.print(f"[green]dirbust[/green] {svc_url} {_meta(result.stats)}")
-                total_new += result.stats.get("new", 0)
-                total_changed += result.stats.get("changed", 0)
-                all_new_urls.extend(result.stats.get("new_urls", []))
-                all_changed_urls.extend(result.stats.get("changed_urls", []))
-            except Exception as e:
-                await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
-                console.print(f"[yellow]dirbust {svc_url} failed: {e}[/yellow]")
-
-    if is_first:
-        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
-    elif notify and (total_new or total_changed):
-        parts = []
-        if total_new:
-            parts.append(f"{total_new} new paths")
-        if total_changed:
-            parts.append(f"{total_changed} status changes")
-        message = f"[wotd] {target_name} dirbust — " + ", ".join(parts)
-        sample = (all_new_urls + all_changed_urls)[:8]
-        if sample:
-            message += "\n\n" + "\n".join(sample)
-        sent = await dispatch(message)
-        if sent:
-            console.print("[dim]notification sent[/dim]")
-
-
 @app.command("dir-brute")
 @handle_errors
 def dirbust(
-    target_or_url: str = typer.Argument(
+    url: str = typer.Argument(
         ...,
-        help=(
-            "Target domain (e.g. acme.com) or full URL with scheme "
-            "(e.g. https://acme.com). Domain mode scans all live HTTP services "
-            "stored for that target; URL mode scans only the given URL."
-        ),
+        help="Full target URL with scheme (e.g. https://acme.com).",
+        callback=validate_url,
     ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after bruteforcing finishes."
@@ -1517,87 +1436,15 @@ def dirbust(
         ),
     ),
 ) -> None:
-    """Bruteforce directories and files on a target.
-
-    Always runs three primary passes: httparchive directories, raft-large-directories,
-    and raft-large-files. Auto-appends tech_{key}.txt passes for every distinct
-    wordlist_key in the target's tech_detections (populated by subdomains and
-    tech-detect). Use --tech to force-add an additional pass not in the store.
-
-    Pass a bare domain to scan all live HTTP services stored for that target
-    (requires a prior subdomains scan). Pass a full URL to scan only that
-    specific service.
-    """
+    """Bruteforce directories and files on a target URL."""
     if tech is not None and not Path(f"/opt/wotd/wordlists/tech_{tech}.txt").exists():
         console.print(
             f"[red]error:[/red] no wordlist for --tech {tech!r} "
             f"(expected /opt/wotd/wordlists/tech_{tech}.txt)"
         )
         raise typer.Exit(code=2)
-    if "://" in target_or_url:
-        asyncio.run(_run_dirbust(target_or_url, notify, tech))
-    else:
-        asyncio.run(_run_dirbust_target(target_or_url, notify, tech))
 
-
-async def _run_vhost_enum_target(
-    target_name: str,
-    notify: bool = False,
-    wordlist: Path | None = None,
-    max_candidates: int = 20000,
-) -> None:
-    await init_db()
-    session_factory = get_session_factory()
-
-    async with session_factory() as session:
-        target = await get_target_by_name(session, target_name)
-        if target is None:
-            console.print(
-                f"[red]error:[/red] target {target_name!r} not found — " "run wotd subdomains first"
-            )
-            raise typer.Exit(code=1)
-
-        scope = Scope(
-            includes=[
-                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
-                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
-            ],
-        )
-
-        service_urls = await get_http_service_urls(session, target.id)
-        if not service_urls:
-            console.print("[yellow]no live HTTP services found for this target[/yellow]")
-            return
-
-        is_first = not await has_prior_scan(session, target.id, VhostEnumModule.name)
-        scan_run = await start_scan_run(session, target.id, VhostEnumModule.name)
-        module = VhostEnumModule(
-            session,
-            target,
-            scope,
-            base_urls=service_urls,
-            candidate_wordlist=wordlist,
-            max_candidates=max_candidates,
-        )
-        try:
-            result = await module.run()
-            await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-            console.print(f"[green]{VhostEnumModule.name}[/green] {_meta(result.stats)}")
-        except Exception as e:
-            await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
-            raise
-
-    new_count = result.stats.get("new", 0)
-    new_urls: list[str] = result.stats.get("new_urls", [])
-    if is_first:
-        console.print("[dim]first scan — baseline established, skipping notify[/dim]")
-    elif notify and new_count:
-        message = f"[wotd] {target_name} vhost-enum — {new_count} new virtual host(s)"
-        if new_urls:
-            message += "\n\n" + "\n".join(new_urls[:8])
-        sent = await dispatch(message)
-        if sent:
-            console.print("[dim]notification sent[/dim]")
+    asyncio.run(_run_dirbust(url, notify, tech))
 
 
 async def _run_vhost_enum_url(
@@ -1608,13 +1455,14 @@ async def _run_vhost_enum_url(
 ) -> None:
     from urllib.parse import urlparse
 
+    from wotd.modules.vhost_enum import VhostEnumModule
+
     parsed = urlparse(url)
     host = parsed.hostname or ""
     root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
 
     await init_db()
     session_factory = get_session_factory()
-
     async with session_factory() as session:
         target = await get_target_by_name(session, root)
         if target is None:
@@ -1633,41 +1481,35 @@ async def _run_vhost_enum_url(
             session,
             target,
             scope,
-            base_urls=[url.rstrip("/")],
+            base_urls=[url],
             candidate_wordlist=wordlist,
             max_candidates=max_candidates,
         )
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=result.stats)
-            console.print(f"[green]{VhostEnumModule.name}[/green] {_meta(result.stats)}")
+            console.print(f"[green]{VhostEnumModule.name}[/green] {url}")
         except Exception as e:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
 
     new_count = result.stats.get("new", 0)
-    new_urls: list[str] = result.stats.get("new_urls", [])
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
     elif notify and new_count:
-        message = f"[wotd] {root} vhost-enum — {new_count} new virtual host(s)"
-        if new_urls:
-            message += "\n\n" + "\n".join(new_urls[:8])
+        message = f"[wotd] {root} vhost-enum — {new_count} new vhosts"
         sent = await dispatch(message)
         if sent:
-            console.print("[dim]notification sent[/dim]")
+            console_print("[dim]notification sent[/dim]")
 
 
 @app.command("vhost-enum")
 @handle_errors
 def vhost_enum(
-    target_or_url: str = typer.Argument(
+    url: str = typer.Argument(
         ...,
-        help=(
-            "Target domain (e.g. acme.com) or full URL with scheme "
-            "(e.g. https://acme.com). Domain mode scans all live HTTP services "
-            "stored for that target; URL mode scans only the given service."
-        ),
+        help="Full target URL with scheme (e.g. https://acme.com).",
+        callback=validate_url,
     ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after vhost enumeration finishes."
@@ -1684,30 +1526,22 @@ def vhost_enum(
         help="Maximum candidate hostnames per run after deduplication.",
     ),
 ) -> None:
-    """Enumerate host-header virtual hosts behind known live services."""
+    """Enumerate host-header virtual hosts behind a known live service URL."""
     if wordlist is not None and not wordlist.exists():
         console.print(f"[red]error:[/red] wordlist not found: {wordlist}")
         raise typer.Exit(code=2)
 
-    if "://" in target_or_url:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(target_or_url)
-        if not parsed.scheme or not parsed.hostname:
-            console.print(
-                "[red]error:[/red] vhost-enum URL mode requires a valid URL "
-                "(e.g. https://acme.com)"
-            )
-            raise typer.Exit(code=2)
-        asyncio.run(_run_vhost_enum_url(target_or_url, notify, wordlist, max_candidates))
-    else:
-        asyncio.run(_run_vhost_enum_target(target_or_url, notify, wordlist, max_candidates))
+    asyncio.run(_run_vhost_enum_url(url, notify, wordlist, max_candidates))
 
 
 @app.command("api-discover")
 @handle_errors
 def api_discover(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    url: str = typer.Argument(
+        ...,
+        help="Full target URL with scheme (e.g. https://api.acme.com).",
+        callback=validate_url,
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
@@ -1726,13 +1560,7 @@ def api_discover(
         False, "--force-trpc", help="Force tRPC probing (applies to active pass)."
     ),
 ) -> None:
-    """Master command orchestrating all API discovery phases.
-
-    Runs passive → active (kiterunner) → gql (graphql) → spec (openapi) in sequence.
-    Each phase wrapped in try/except so a missing tool doesn't abort the rest.
-    Use --method to enable specific phases (repeatable). Sub-pass flags forwarded
-    to active pass.
-    """
+    """Master command orchestrating all API discovery phases for a target URL."""
     valid_methods = {"passive", "active", "gql", "spec"}
     if method:
         for m in method:
@@ -1748,7 +1576,7 @@ def api_discover(
 
     asyncio.run(
         _run_api_discover(
-            target,
+            url,
             notify,
             active_methods,
             skip_brute,
@@ -1759,14 +1587,20 @@ def api_discover(
 
 
 async def _run_api_discover(
-    target_name: str,
+    url: str,
     notify: bool,
     active_methods: set[str],
     skip_brute: bool = False,
     skip_trpc: bool = False,
     force_trpc: bool = False,
 ) -> None:
-    """Orchestrate all API discovery phases with unified notification."""
+    """Orchestrate all API discovery phases for a single URL."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    target_name = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
     await init_db()
     session_factory = get_session_factory()
 
@@ -1809,7 +1643,7 @@ async def _run_api_discover(
                 is_first_overall = False
             except Exception as e:
                 all_errors.append(f"gql: {e}")
-                console.print(f"[yellow]api-graphql warning: {e}[/yellow]")
+                console_print(f"[yellow]api-graphql warning: {e}[/yellow]")
 
         # Phase 4: spec (openapi)
         if "spec" in active_methods:
@@ -1818,7 +1652,7 @@ async def _run_api_discover(
                 is_first_overall = False
             except Exception as e:
                 all_errors.append(f"spec: {e}")
-                console.print(f"[yellow]api-openapi warning: {e}[/yellow]")
+                console_print(f"[yellow]api-openapi warning: {e}[/yellow]")
 
         # Unified notification
         if notify and not is_first_overall:
@@ -1859,7 +1693,7 @@ async def _run_api_discover(
 @app.command("js-discover")
 @handle_errors
 def discover_js(
-    target: str = typer.Argument(
+    url: str = typer.Argument(
         ...,
         help="Full target URL including scheme (e.g. https://acme.com)",
         callback=validate_url,
@@ -1873,60 +1707,61 @@ def discover_js(
         help="Run ffuf against live HTTP services to find unlinked JS files.",
     ),
 ) -> None:
-    """Discover JavaScript files for a target URL.
-
-    Collects .js URLs from the endpoints table and by running subjs and getjs
-    against the provided URL. With --bruteforce-js, also runs ffuf against
-    every live HTTP service using httparchive_js.txt to surface unlinked files.
-    """
-    asyncio.run(_run_discover_js(target, notify, bruteforce_js))
+    """Discover JavaScript files for a target URL."""
+    asyncio.run(_run_discover_js(url, notify, bruteforce_js))
 
 
 @app.command("web-fingerprint")
 @handle_errors
 def web_profile(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    url: str = typer.Argument(
+        ...,
+        help="Full target URL with scheme (e.g. https://acme.com).",
+        callback=validate_url,
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
 ) -> None:
-    """Capture HTTP metadata posture and content fingerprints for all live services.
-
-    Probes every known HTTP service URL, extracts security headers (Server, CSP, HSTS, CORS),
-    parses cookie flags (Secure, HttpOnly, SameSite), and computes content hashes. Detects
-    metadata/fingerprint drift from prior scans and evaluates security posture.
-    """
-    asyncio.run(_run_web_profile(target, notify))
+    """Capture HTTP metadata posture and content fingerprints for a target URL."""
+    asyncio.run(_run_web_profile(url, notify))
 
 
-async def _run_web_profile(target_name: str, notify: bool = False) -> None:
+async def _run_web_profile(url: str, notify: bool = False) -> None:
+    from urllib.parse import urlparse
+
+    from wotd.modules.web_profile import WebProfileModule
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
     await init_db()
     session_factory = get_session_factory()
 
     async with session_factory() as session:
-        target = await get_target_by_name(session, target_name)
+        target = await get_target_by_name(session, root)
         if target is None:
-            target = await create_target(session, name=target_name, root_domains=[target_name])
+            target = await create_target(session, name=root, root_domains=[root])
 
         scope = Scope(
             includes=[
-                ScopeRule(target.root_domains.split(",")[0], RuleType.EXACT),
-                ScopeRule(f"*.{target.root_domains.split(',')[0]}", RuleType.WILDCARD),
+                ScopeRule(root, RuleType.EXACT),
+                ScopeRule(f"*.{root}", RuleType.WILDCARD),
             ],
         )
 
         scan_run = await start_scan_run(session, target.id, "web_profile")
 
         try:
-            module = WebProfileModule(session, target, scope)
+            module = WebProfileModule(session, target, scope, single_url=url)
             result = await module.run()
 
             await finish_scan_run(
                 session, scan_run, status="completed", summary=_meta(result.stats)
             )
 
-            console.print("[bold]web-profile scan completed[/bold]")
-            console.print(format_cli_summary(result.stats))
+            console.print(f"[green]web-profile[/green] {url}")
 
             # Notify if requested and not first scan
             if notify and await has_prior_scan(session, target.id, "web_profile"):
@@ -1935,23 +1770,27 @@ async def _run_web_profile(target_name: str, notify: bool = False) -> None:
 
                 if posture_findings > 0 or profile_changes > 0:
                     message = (
-                        f"[wotd] {target_name} web-profile — {posture_findings} posture findings, "
+                        f"[wotd] {root} web-profile — {posture_findings} posture findings, "
                         f"{profile_changes} metadata changes"
                     )
                     sent = await dispatch(message)
                     if sent:
-                        console.print("[dim]notification sent[/dim]")
+                        console_print("[dim]notification sent[/dim]")
 
         except Exception as e:
             await finish_scan_run(session, scan_run, status="failed", summary={"error": str(e)})
-            console.print(f"[red]error[/red]: {e}")
+            console_print(f"[red]error[/red]: {e}")
             raise typer.Exit(code=1) from e
 
 
 @app.command("web-screenshot")
 @handle_errors
 def visual_surface(
-    target: str = typer.Argument(..., help="Target domain (e.g. acme.com)"),
+    url: str = typer.Argument(
+        ...,
+        help="Full target URL with scheme (e.g. https://acme.com).",
+        callback=validate_url,
+    ),
     notify: bool = typer.Option(
         False, "--notify", help="Send notifications after the scan finishes."
     ),
@@ -1963,27 +1802,35 @@ def visual_surface(
         help="Hamming distance threshold for treating screenshots as visually different.",
     ),
 ) -> None:
-    """Capture screenshots for live services and track visual drift."""
-    asyncio.run(_run_visual_surface(target, notify, phash_threshold))
+    """Capture screenshot for a target URL and track visual drift."""
+    asyncio.run(_run_visual_surface(url, notify, phash_threshold))
 
 
 async def _run_visual_surface(
-    target_name: str,
+    url: str,
     notify: bool = False,
     phash_threshold: int = 10,
 ) -> None:
+    from urllib.parse import urlparse
+
+    from wotd.modules.visual_surface import VisualSurfaceModule
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    root = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+
     await init_db()
     session_factory = get_session_factory()
 
     async with session_factory() as session:
-        target = await get_target_by_name(session, target_name)
+        target = await get_target_by_name(session, root)
         if target is None:
-            target = await create_target(session, name=target_name, root_domains=[target_name])
+            target = await create_target(session, name=root, root_domains=[root])
 
         scope = Scope(
             includes=[
-                ScopeRule(pattern=f"*.{target_name}", rule_type=RuleType.WILDCARD),
-                ScopeRule(pattern=target_name, rule_type=RuleType.EXACT),
+                ScopeRule(pattern=f"*.{root}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=root, rule_type=RuleType.EXACT),
             ],
         )
 
@@ -1993,34 +1840,31 @@ async def _run_visual_surface(
             session,
             target,
             scope,
+            single_url=url,
             phash_distance_threshold=phash_threshold,
         )
         try:
             result = await module.run()
             await finish_scan_run(session, scan_run, "completed", summary=_meta(result.stats))
-            console.print(f"[green]{VisualSurfaceModule.name}[/green] {_meta(result.stats)}")
+            console_print(f"[green]{VisualSurfaceModule.name}[/green] {url}")
         except Exception as e:
             await finish_scan_run(session, scan_run, "failed", summary={"error": str(e)})
             raise
 
     new_count = result.stats.get("new_services_screenshoted", 0)
     visual_changes = result.stats.get("visual_changes_detected", 0)
-    sample_urls = (result.stats.get("changed_urls") or result.stats.get("new_urls") or [])[:8]
+
     if is_first:
         console.print("[dim]first scan — baseline established, skipping notify[/dim]")
     elif notify and (new_count or visual_changes):
         message = (
-            f"[wotd] {target_name} visual-surface — "
+            f"[wotd] {root} visual-surface — "
             f"{new_count} new screenshots, {visual_changes} visual changes"
         )
-        if sample_urls:
-            message += "\n\n" + "\n".join(sample_urls)
         sent = await dispatch(message)
         if sent:
-            console.print("[dim]notification sent[/dim]")
+            console_print("[dim]notification sent[/dim]")
 
-
-def _render_dir_results_table(rows: list[DirResultRow]) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("url", overflow="fold")
     table.add_column("status", justify="right")
@@ -3177,44 +3021,6 @@ async def _show_service_screenshots(
     console.print(f"[dim]{len(rows)} screenshot(s)[/dim]")
 
 
-@show_app.command("web-screenshots")
-@handle_errors
-def show_service_screenshots(
-    target: str | None = typer.Argument(
-        None, help="Target domain. Omit to show across all targets."
-    ),
-    host: str | None = typer.Option(None, "--host", help="Filter by exact host."),
-    url: str | None = typer.Option(None, "--url", help="Filter by exact service URL."),
-    changed_since: DurationType = typer.Option(
-        None,
-        "--changed-since",
-        help="Only rows first seen within this window (e.g. 24h, 7d).",
-        callback=validate_duration,
-    ),
-    limit: int = typer.Option(25, "--limit", help="Max rows to show. 0 = no limit."),
-    all_rows: bool = typer.Option(False, "--all", help="Ignore --limit, show everything."),
-    as_json: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
-) -> None:
-    """List service screenshots and visual fingerprints."""
-    if all_rows:
-        changed_since_td: timedelta | None = None
-        effective_limit: int | None = None
-    else:
-        effective_limit = None if limit == 0 else limit
-        changed_since_td = changed_since
-
-    asyncio.run(
-        _show_service_screenshots(
-            target_name=target,
-            host=host,
-            url=url,
-            changed_since=changed_since_td,
-            limit=effective_limit,
-            as_json=as_json,
-        )
-    )
-
-
 _EXAMPLES = """\
 [bold]Subdomain enumeration[/bold]
   wotd sub-enum acme.com                 full pipeline (passive → active → resolve → probe)
@@ -3246,16 +3052,16 @@ _EXAMPLES = """\
   wotd ls endpoints acme.com             alias for wotd show endpoints
 
 [bold]Directory bruteforcing[/bold]
-  wotd dir-brute acme.com                    scan all live HTTP services + auto-tech passes
-  wotd dir-brute https://acme.com            scan only this URL + auto-tech passes
-  wotd dir-brute acme.com --tech grafana     force a specific tech pass on top of auto-tech
-  wotd dir-brute acme.com --notify           also dispatch notification on new/changed paths
+  wotd dir-brute https://acme.com            scan this URL + auto-tech passes
+  wotd dir-brute https://acme.com --tech php force a specific tech pass
+  wotd dir-brute https://acme.com --notify   dispatch notification on new/changed paths
   wotd show dir-results acme.com             latest 25 results
   wotd show dir-results acme.com --all       every result, no limit
   wotd show dir-results acme.com --status 200  filter by status code
-  wotd show dir-results acme.com --wordlist tech_php  filter by wordlist pass
-  wotd show dir-results acme.com --since 24h  found in the last day
-  wotd show dir-results acme.com --json      raw json output
+
+[bold]Vhost Enumeration[/bold]
+  wotd vhost-enum https://1.2.3.4            discover vhosts behind an IP
+  wotd vhost-enum https://acme.com           discover vhosts for a domain
 
 [bold]Subdomain permutation[/bold]
   wotd sub-permute acme.com                         generate and resolve target-aware mutations
@@ -3269,32 +3075,17 @@ _EXAMPLES = """\
   wotd show sub-candidates acme.com --all           every row, no limit
   wotd show sub-candidates acme.com --json          raw json output
 
-[bold]Virtual host enumeration[/bold]
-  wotd vhost-enum acme.com                    probe all known live services with Host fuzzing
-  wotd vhost-enum https://acme.com            probe one specific service
-  wotd vhost-enum acme.com --wordlist hosts.txt  add candidate labels/FQDNs from file
-  wotd vhost-enum acme.com --notify           also dispatch notification on new vhosts
-  wotd show vhosts acme.com                   latest 25 discovered vhosts
-  wotd show vhosts acme.com --base-url https://app.acme.com  filter by base service
-  wotd show vhosts acme.com --host admin.acme.com  filter by exact vhost
-  wotd show vhosts acme.com --status 200      filter by HTTP status code
-  wotd show vhosts acme.com --all             every row, no limit
-  wotd show vhosts acme.com --json            raw json output
-
 [bold]Tech detections[/bold]
-  wotd tech-detect acme.com                     re-run httpx -tech-detect on all live hosts
-  wotd tech-detect acme.com --notify            also dispatch notification on new detections
+  wotd tech-detect https://acme.com             re-run tech detection on a URL
+  wotd tech-detect https://acme.com --notify    dispatch notification on new detections
   wotd show tech-detections acme.com            latest 25 detections
   wotd show tech-detections acme.com --all      every row, no limit
   wotd show tech-detections acme.com --tech PHP filter by tech name
   wotd show tech-detections acme.com --json     raw json output
 
 [bold]Web screenshots[/bold]
-  wotd web-screenshot acme.com                  capture screenshots for live HTTP services
-  wotd web-screenshot acme.com --phash-threshold 12  tune visual drift sensitivity
-  wotd web-screenshot acme.com --notify         also dispatch notification on visual changes
-  wotd show web-screenshots acme.com            latest screenshot rows
-  wotd show web-screenshots acme.com --host app.acme.com  filter by host
+  wotd web-screenshot https://acme.com         capture screenshot for a URL
+  wotd web-screenshot https://acme.com --notify  dispatch notification on visual changes
   wotd show web-screenshots acme.com --changed-since 24h  only recent screenshot rows
   wotd show web-screenshots acme.com --json raw json output
 
@@ -3304,10 +3095,9 @@ _EXAMPLES = """\
   wotd js-discover https://acme.com --notify    also dispatch notification on new JS files
   wotd show js-files acme.com           inspect downloaded JS files
 
-[bold]API Discovery[/bold]
-  wotd api-discover acme.com                    run all API discovery phases (passive, active, gql, spec)
-  wotd api-discover acme.com --method gql       run only GraphQL discovery
-  wotd api-discover acme.com --method passive --method active  run only passive and active passes
+[bold]API discovery[/bold]
+  wotd api-discover https://api.acme.com       run all API discovery phases
+  wotd api-discover https://api.acme.com --method gql  run only GraphQL discovery
   wotd show api-routes acme.com                 list all discovered API routes
   wotd show graphql-endpoints acme.com          list all GraphQL endpoints found
   wotd show web-interesting acme.com            list endpoints flagged by patterns

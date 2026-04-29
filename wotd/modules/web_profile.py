@@ -31,8 +31,15 @@ class WebProfileModule(Module):
 
     name = "web_profile"
 
-    def __init__(self, session: AsyncSession, target: Target, scope: Scope) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        target: Target,
+        scope: Scope,
+        single_url: str | None = None,
+    ) -> None:
         super().__init__(session, target, scope)
+        self.single_url = single_url
 
     async def _compute_favicon_hash(self, favicon_path: str | None) -> str | None:
         """Compute hash of favicon if available.
@@ -207,15 +214,18 @@ class WebProfileModule(Module):
     async def run(self) -> ModuleResult:
         """Execute the web profile module.
 
-        1. Read all known HTTP service URLs for this target from database.
+        1. Determine URLs to probe (single URL or all from DB).
         2. Re-probe them via httpx-pd with header extraction.
         3. Store web profiles (metadata) and service fingerprints (hashes).
         4. Evaluate security posture.
         5. Compare against prior profiles for drift detection.
         6. Return stats for the scan run.
         """
-        # Read all http_services URLs for this target
-        service_urls = await get_http_service_urls(self.session, self.target.id)
+        if self.single_url:
+            service_urls = [self.single_url]
+        else:
+            # Read all http_services URLs for this target
+            service_urls = await get_http_service_urls(self.session, self.target.id)
 
         if not service_urls:
             return ModuleResult(

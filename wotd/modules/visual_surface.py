@@ -117,9 +117,11 @@ class VisualSurfaceModule(Module):
         session: AsyncSession,
         target: Target,
         scope: Scope,
+        single_url: str | None = None,
         phash_distance_threshold: int = 10,
     ) -> None:
         super().__init__(session, target, scope)
+        self.single_url = single_url
         self.phash_distance_threshold = phash_distance_threshold
 
     async def _capture_with_tool(
@@ -205,7 +207,11 @@ class VisualSurfaceModule(Module):
             raise RuntimeError(f"unable to capture screenshot for {url}: {last_error}")
 
     async def run(self) -> ModuleResult:
-        service_urls = await get_http_service_urls(self.session, self.target.id)
+        if self.single_url:
+            service_urls = [self.single_url]
+        else:
+            service_urls = await get_http_service_urls(self.session, self.target.id)
+
         if not service_urls:
             return ModuleResult(
                 module=self.name,
