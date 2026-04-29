@@ -3178,19 +3178,14 @@ async def _run_scan(target: str, notify: bool) -> None:
     if notify:
         console.print("[dim]notify is not yet wired for dispatcher runs[/dim]")
 
-    ok_count = sum(1 for r in report.results if r.ok)
-    fail_count = len(report.failed)
     console.print()
     console.print(
         Panel(
-            f"[green]{ok_count} succeeded[/green]  "
-            f"[red]{fail_count} failed[/red]",
+            "The reactive dispatcher has completed all tasks. Check 'wotd show' commands for results.",
             title="scan complete",
+            border_style="green",
         )
     )
-    if report.failed:
-        for r in report.failed:
-            console.print(f"  [red]✗[/red] {r.tool}: {r.error}")
 
 
 @app.command("examples")
