@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wotd.models import Target
+
+if TYPE_CHECKING:
+    from wotd.tasks import Task
 from wotd.scope import Scope
 
 
@@ -28,10 +31,17 @@ class Module(ABC):
 
     name: str
 
-    def __init__(self, session: AsyncSession, target: Target, scope: Scope) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        target: Target,
+        scope: Scope,
+        task: "Task | None" = None,
+    ) -> None:
         self.session = session
         self.target = target
         self.scope = scope
+        self.task = task
 
     @abstractmethod
     async def run(self) -> ModuleResult:

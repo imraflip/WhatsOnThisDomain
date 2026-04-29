@@ -463,3 +463,20 @@ class ServiceFingerprint(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+class TaskRunLog(Base):
+    __tablename__ = "task_run_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_module: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    output_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+

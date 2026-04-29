@@ -10,7 +10,9 @@ from wotd.models import Target
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import normalize_hosts, parse_lines
 from wotd.scope import Scope
-from wotd.store import upsert_subdomains
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.store import get_subdomain_hosts, upsert_subdomains
+from wotd.tasks import DomainTask, HostnameTask, Task
 from wotd.tools import ToolNotFoundError, run_tool
 from wotd.utils.resolvers import ensure_resolvers_fresh
 
@@ -28,8 +30,9 @@ class SubdomainsActiveModule(Module):
         scope: Scope,
         wordlist: Path = DEFAULT_WORDLIST,
         resolvers: Path = DEFAULT_RESOLVERS,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.wordlist = wordlist
         self.resolvers = resolvers
 
@@ -87,3 +90,15 @@ class SubdomainsActiveModule(Module):
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(DomainTask, module_name=SubdomainsActiveModule.name)
+async def handle_domain_active(task: DomainTask, ctx: ModuleContext) -> list[Task]:
+    module = SubdomainsActiveModule(ctx.session, ctx.target, ctx.scope, task=task)
+    await ctx.run_module(module)
+    hosts = await get_subdomain_hosts(ctx.session, ctx.target.id)
+    return [
+        HostnameTask(fqdn=host, parent_task_id=task.id, source_module=module.name)
+        for host in hosts
+    ]
+

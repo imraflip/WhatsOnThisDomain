@@ -19,6 +19,8 @@ from wotd.store import (
     upsert_web_profiles,
 )
 from wotd.tools import run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import FingerprintTag, Task, UrlTask
 
 
 class WebProfileModule(Module):
@@ -37,9 +39,12 @@ class WebProfileModule(Module):
         target: Target,
         scope: Scope,
         single_url: str | None = None,
+        urls: list[str] | None = None,
+        task: Any | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.single_url = single_url
+        self.urls = urls
 
     async def _compute_favicon_hash(self, favicon_path: str | None) -> str | None:
         """Compute hash of favicon if available.
@@ -221,7 +226,9 @@ class WebProfileModule(Module):
         5. Compare against prior profiles for drift detection.
         6. Return stats for the scan run.
         """
-        if self.single_url:
+        if self.urls:
+            service_urls = self.urls
+        elif self.single_url:
             service_urls = [self.single_url]
         else:
             # Read all http_services URLs for this target
@@ -318,5 +325,38 @@ class WebProfileModule(Module):
                 "fingerprints_stored": fingerprints_stored,
                 "posture_findings": len(posture_findings),
                 "profile_changes": profile_changes,
+                "profiles": profiles,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=WebProfileModule.name)
+async def handle_url_profile(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = WebProfileModule(ctx.session, ctx.target, ctx.scope, urls=[task.url], task=task)
+    result = await ctx.run_module(module)
+    profiles = result.stats.get("profiles", [])
+    output: list[Task] = []
+    for profile in profiles:
+        url = profile.get("url")
+        headers_json = profile.get("headers_json")
+        if not isinstance(url, str):
+            continue
+        headers: dict[str, str] = {}
+        if isinstance(headers_json, str) and headers_json:
+            try:
+                parsed = json.loads(headers_json)
+                if isinstance(parsed, dict):
+                    headers = {str(k): str(v) for k, v in parsed.items()}
+            except json.JSONDecodeError:
+                headers = {}
+        output.append(
+            FingerprintTag(
+                url=url,
+                headers=headers,
+                server=profile.get("server") if isinstance(profile.get("server"), str) else None,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
+

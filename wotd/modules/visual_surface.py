@@ -24,6 +24,8 @@ from wotd.store import (
     upsert_service_screenshots,
 )
 from wotd.tools import ToolNotFoundError, run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ScreenshotTag, Task, UrlTask
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _SCREENSHOT_DIR = Path.home() / ".local" / "share" / "wotd" / "screenshots"
@@ -119,10 +121,13 @@ class VisualSurfaceModule(Module):
         scope: Scope,
         single_url: str | None = None,
         phash_distance_threshold: int = 10,
+        urls: list[str] | None = None,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.single_url = single_url
         self.phash_distance_threshold = phash_distance_threshold
+        self.urls = urls
 
     async def _capture_with_tool(
         self,
@@ -207,7 +212,9 @@ class VisualSurfaceModule(Module):
             raise RuntimeError(f"unable to capture screenshot for {url}: {last_error}")
 
     async def run(self) -> ModuleResult:
-        if self.single_url:
+        if self.urls:
+            service_urls = self.urls
+        elif self.single_url:
             service_urls = [self.single_url]
         else:
             service_urls = await get_http_service_urls(self.session, self.target.id)
@@ -278,6 +285,31 @@ class VisualSurfaceModule(Module):
                 "new_urls": new_urls,
                 "changed_urls": changed_urls,
                 "existing": existing_count,
+                "captures": captures,
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=VisualSurfaceModule.name)
+async def handle_url_screenshot(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = VisualSurfaceModule(ctx.session, ctx.target, ctx.scope, urls=[task.url], task=task)
+    result = await ctx.run_module(module)
+    captures = result.stats.get("captures", [])
+    output: list[Task] = []
+    for capture in captures:
+        url = capture.get("url")
+        path = capture.get("screenshot_path")
+        if not isinstance(url, str) or not isinstance(path, str):
+            continue
+        output.append(
+            ScreenshotTag(
+                url=url,
+                path=path,
+                phash=capture.get("phash") if isinstance(capture.get("phash"), str) else None,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
+

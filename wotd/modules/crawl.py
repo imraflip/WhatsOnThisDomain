@@ -14,6 +14,8 @@ from wotd.parsers import normalize_urls, parse_lines
 from wotd.scope import Scope
 from wotd.store import upsert_endpoints, upsert_interesting_endpoints
 from wotd.tools import ToolNotFoundError, ToolResult, run_gf, run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import EndpointTask, Task, UrlTask
 
 _GF_ENDPOINT_PATTERNS: tuple[str, ...] = (
     "xss",
@@ -123,8 +125,15 @@ async def _run_hakrawler(url: str) -> ToolResult:
 class CrawlModule(Module):
     name = "crawl"
 
-    def __init__(self, session: AsyncSession, target: Target, scope: Scope, url: str) -> None:
-        super().__init__(session, target, scope)
+    def __init__(
+        self,
+        session: AsyncSession,
+        target: Target,
+        scope: Scope,
+        url: str,
+        task: object | None = None,
+    ) -> None:
+        super().__init__(session, target, scope, task=task)
         self.url = url
 
     async def run(self) -> ModuleResult:
@@ -209,3 +218,15 @@ class CrawlModule(Module):
             if host and self.scope.is_in_scope(host):
                 result[url] = sources
         return result
+
+
+@dispatcher.register(UrlTask, module_name=CrawlModule.name)
+async def handle_url_crawl(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = CrawlModule(ctx.session, ctx.target, ctx.scope, task.url, task=task)
+    result = await ctx.run_module(module)
+    new_urls = result.stats.get("new_urls", [])
+    return [
+        EndpointTask(url=url, parent_task_id=task.id, source_module=module.name)
+        for url in new_urls
+    ]
+

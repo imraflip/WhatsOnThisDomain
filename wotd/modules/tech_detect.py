@@ -12,6 +12,8 @@ from typing import Any
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import parse_jsonl
 from wotd.store import get_http_service_urls, upsert_tech_detections
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import Task, TechTag, UrlTask
 from wotd.tech_map import tech_to_wordlist_key
 from wotd.tools import ToolNotFoundError, run_tool
 
@@ -25,12 +27,17 @@ class TechDetectModule(Module):
         target: Target,
         scope: Scope,
         single_url: str | None = None,
+        urls: list[str] | None = None,
+        task: Any | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.single_url = single_url
+        self.urls = urls
 
     async def run(self) -> ModuleResult:
-        if self.single_url:
+        if self.urls:
+            urls = self.urls
+        elif self.single_url:
             urls = [self.single_url]
         else:
             urls = await get_http_service_urls(self.session, self.target.id)
@@ -98,8 +105,27 @@ class TechDetectModule(Module):
             stats={
                 "input_urls": len(urls),
                 "detections": len(detections),
+                "detections_list": detections,
                 "new": new_count,
                 "existing": existing_count,
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=TechDetectModule.name)
+async def handle_url_tech(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = TechDetectModule(ctx.session, ctx.target, ctx.scope, urls=[task.url], task=task)
+    result = await ctx.run_module(module)
+    detections = result.stats.get("detections_list", [])
+    by_url: dict[str, list[str]] = {}
+    for item in detections:
+        url = item.get("url")
+        tech = item.get("tech")
+        if isinstance(url, str) and isinstance(tech, str):
+            by_url.setdefault(url, []).append(tech)
+    return [
+        TechTag(url=url, techs=sorted(set(techs)), parent_task_id=task.id, source_module=module.name)
+        for url, techs in by_url.items()
+    ]
+

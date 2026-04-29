@@ -24,6 +24,8 @@ from wotd.store import (
 )
 from wotd.tools import ToolNotFoundError, ToolTimeoutError, run_tool
 from wotd.utils.resolvers import ensure_resolvers_fresh
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import DomainTask, HostnameTask, Task
 
 DEFAULT_RESOLVERS = "/opt/wotd/resolvers.txt"
 
@@ -82,8 +84,9 @@ class SubdomainsPermuteModule(Module):
         max_candidates: int,
         budget_minutes: int,
         resolvers_path: str = DEFAULT_RESOLVERS,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.mode = mode
         self.max_candidates = max_candidates
         self.budget_minutes = budget_minutes
@@ -339,3 +342,23 @@ class SubdomainsPermuteModule(Module):
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(DomainTask, module_name=SubdomainsPermuteModule.name)
+async def handle_domain_permute(task: DomainTask, ctx: ModuleContext) -> list[Task]:
+    module = SubdomainsPermuteModule(
+        ctx.session,
+        ctx.target,
+        ctx.scope,
+        mode="balanced",
+        max_candidates=20000,
+        budget_minutes=30,
+        task=task,
+    )
+    result = await ctx.run_module(module)
+    new_hosts = result.stats.get("new_hosts", [])
+    return [
+        HostnameTask(fqdn=host, parent_task_id=task.id, source_module=module.name)
+        for host in new_hosts
+    ]
+

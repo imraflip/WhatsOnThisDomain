@@ -3123,7 +3123,12 @@ def scan(
     ),
 ) -> None:
     """Run the full recon pipeline with scope-aware tool selection."""
-    from wotd.orchestrator import InputRouter, ReconPipeline
+    asyncio.run(_run_scan(target, notify))
+
+
+async def _run_scan(target: str, notify: bool) -> None:
+    from wotd.orchestrator import InputRouter, ScopeType, dispatcher, load_handlers
+    from wotd.tasks import DomainTask, UrlTask
 
     routed = InputRouter.classify(target)
     console.print(
@@ -3134,8 +3139,44 @@ def scan(
         console.print(f"[bold]path prefix:[/bold] {routed.path_prefix}")
     console.print()
 
-    pipeline = ReconPipeline(routed, notify=notify)
-    report = asyncio.run(pipeline.run())
+    await init_db()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        target_row = await get_target_by_name(session, routed.root_domain)
+        if target_row is None:
+            target_row = await create_target(
+                session,
+                name=routed.root_domain,
+                root_domains=[routed.root_domain],
+            )
+
+        scope = Scope(
+            includes=[
+                ScopeRule(pattern=f"*.{routed.root_domain}", rule_type=RuleType.WILDCARD),
+                ScopeRule(pattern=routed.root_domain, rule_type=RuleType.EXACT),
+            ],
+        )
+
+    load_handlers()
+    dispatcher.configure(
+        scope=scope,
+        session_factory=session_factory,
+        target=target_row,
+        path_prefix=routed.path_prefix,
+        max_workers=3,
+    )
+
+    if routed.scope_type == ScopeType.WILDCARD:
+        seed: DomainTask | UrlTask = DomainTask(domain=routed.root_domain)
+    else:
+        base_url = routed.base_url or f"https://{routed.root_domain}"
+        url = base_url + (routed.path_prefix or "")
+        seed = UrlTask(url=url)
+
+    await dispatcher.enqueue(seed)
+    await dispatcher.run_until_quiescent()
+    if notify:
+        console.print("[dim]notify is not yet wired for dispatcher runs[/dim]")
 
     ok_count = sum(1 for r in report.results if r.ok)
     fail_count = len(report.failed)

@@ -18,6 +18,8 @@ from wotd.parsers import normalize_hosts
 from wotd.scope import Scope
 from wotd.store import get_subdomain_hosts, upsert_vhost_services
 from wotd.tools import ToolNotFoundError, run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import Task, UrlTask
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -125,8 +127,9 @@ class VhostEnumModule(Module):
         base_urls: list[str],
         candidate_wordlist: Path | None = None,
         max_candidates: int = 20000,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.base_urls = sorted({u.rstrip("/") for u in base_urls if u.strip()})
         self.candidate_wordlist = candidate_wordlist
         self.max_candidates = max_candidates
@@ -333,3 +336,15 @@ class VhostEnumModule(Module):
         finally:
             if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
+
+
+@dispatcher.register(UrlTask, module_name=VhostEnumModule.name)
+async def handle_url_vhost(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = VhostEnumModule(ctx.session, ctx.target, ctx.scope, [task.url], task=task)
+    result = await ctx.run_module(module)
+    new_urls = result.stats.get("new_urls", [])
+    return [
+        UrlTask(url=url, parent_task_id=task.id, source_module=module.name)
+        for url in new_urls
+    ]
+

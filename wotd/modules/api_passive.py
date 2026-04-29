@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 from wotd.modules.base import Module, ModuleResult
 from wotd.store import list_endpoints, list_js_endpoints, upsert_api_routes
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ApiRouteTask, Task, UrlTask
 
 _API_PATH_RE = re.compile(
     r"(?:/api/|/rest/|/rpc/|/graphql|/v[123]/|/api/trpc/|/trpc/|/\.well-known/openapi)"
@@ -113,3 +115,28 @@ class ApiPassiveModule(Module):
                 "new_keys": new_keys,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=ApiPassiveModule.name)
+async def handle_url_api_passive(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = ApiPassiveModule(ctx.session, ctx.target, ctx.scope, task=task)
+    result = await ctx.run_module(module)
+    new_keys = result.stats.get("new_keys", [])
+    output: list[Task] = []
+    for key in new_keys:
+        if not isinstance(key, str):
+            continue
+        parts = key.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        method, url = parts
+        output.append(
+            ApiRouteTask(
+                url=url,
+                method=method,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
+

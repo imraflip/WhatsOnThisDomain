@@ -22,6 +22,8 @@ from wotd.store import (
     upsert_js_secrets,
 )
 from wotd.tools import ToolNotFoundError, run_gf, run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import EndpointTask, JsFileTask, SecretTask, Task, UrlTask
 
 _JSLUICE_CONCURRENCY = 10
 _WORDLIST_JS = "/opt/wotd/wordlists/httparchive_js.txt"
@@ -179,8 +181,9 @@ class JsDiscoveryModule(Module):
         scope: Scope,
         seed_urls: list[str] | None = None,
         bruteforce_js: bool = False,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.seed_urls = seed_urls or []
         self.bruteforce_js = bruteforce_js
 
@@ -311,7 +314,38 @@ class JsDiscoveryModule(Module):
             "js_secrets_existing": existing_sec,
             "new_js_urls": new_js_urls,
             "new_ep_urls": new_ep_urls,
+            "secret_items": secret_dicts,
         }
         if errors:
             stats["errors"] = errors
         return ModuleResult(module=self.name, stats=stats)
+
+
+@dispatcher.register(UrlTask, module_name=JsDiscoveryModule.name)
+async def handle_url_js(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = JsDiscoveryModule(ctx.session, ctx.target, ctx.scope, seed_urls=[task.url], task=task)
+    result = await ctx.run_module(module)
+    new_js_urls = result.stats.get("new_js_urls", [])
+    new_ep_urls = result.stats.get("new_ep_urls", [])
+    secret_items = result.stats.get("secret_items", [])
+    output: list[Task] = []
+    for url in new_js_urls:
+        output.append(JsFileTask(url=url, parent_task_id=task.id, source_module=module.name))
+    for url in new_ep_urls:
+        output.append(EndpointTask(url=url, parent_task_id=task.id, source_module=module.name))
+    for item in secret_items:
+        kind = item.get("kind")
+        data = item.get("data")
+        source_js_url = item.get("source_js_url")
+        if isinstance(kind, str) and isinstance(data, str) and isinstance(source_js_url, str):
+            output.append(
+                SecretTask(
+                    kind=kind,
+                    data=data,
+                    source_js_url=source_js_url,
+                    parent_task_id=task.id,
+                    source_module=module.name,
+                )
+            )
+    return output
+

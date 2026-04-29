@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 from wotd.modules.base import Module, ModuleResult
 from wotd.store import upsert_api_routes, upsert_graphql_endpoints
 from wotd.tools import run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ApiRouteTask, Task, UrlTask
 
 
 class ApiGraphqlModule(Module):
@@ -112,6 +114,30 @@ class ApiGraphqlModule(Module):
                 "new_route_keys": route_keys,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=ApiGraphqlModule.name)
+async def handle_url_api_graphql(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = ApiGraphqlModule(ctx.session, ctx.target, ctx.scope, task=task)
+    result = await ctx.run_module(module)
+    route_keys = result.stats.get("new_route_keys", [])
+    output: list[Task] = []
+    for key in route_keys:
+        if not isinstance(key, str):
+            continue
+        parts = key.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        method, url = parts
+        output.append(
+            ApiRouteTask(
+                url=url,
+                method=method,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
 
     async def _detect_graphql_endpoints(self, base_url: str) -> list[str]:
         """Phase 1: Detect GraphQL endpoints via ffuf + probe."""

@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 from wotd.modules.base import Module, ModuleResult
 from wotd.store import list_api_routes, upsert_api_routes
 from wotd.tools import run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ApiRouteTask, Task, UrlTask
 
 
 class ApiKiterunnerModule(Module):
@@ -22,8 +24,9 @@ class ApiKiterunnerModule(Module):
         skip_brute: bool = False,
         skip_trpc: bool = False,
         force_trpc: bool = False,
+        task: Any | None = None,
     ):
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.skip_brute = skip_brute
         self.skip_trpc = skip_trpc
         self.force_trpc = force_trpc
@@ -116,6 +119,30 @@ class ApiKiterunnerModule(Module):
                 "new_keys": new_keys,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=ApiKiterunnerModule.name)
+async def handle_url_api_kiterunner(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = ApiKiterunnerModule(ctx.session, ctx.target, ctx.scope, task=task)
+    result = await ctx.run_module(module)
+    new_keys = result.stats.get("new_keys", [])
+    output: list[Task] = []
+    for key in new_keys:
+        if not isinstance(key, str):
+            continue
+        parts = key.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        method, url = parts
+        output.append(
+            ApiRouteTask(
+                url=url,
+                method=method,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
 
     async def _run_kr_scan(self, url: str) -> list[dict[str, Any]]:
         """Run kr scan (method-aware, primary pass)."""

@@ -6,7 +6,9 @@ import asyncio
 
 from wotd.modules.base import Module, ModuleResult
 from wotd.parsers import normalize_hosts, parse_lines
-from wotd.store import upsert_subdomains
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.store import get_subdomain_hosts, upsert_subdomains
+from wotd.tasks import DomainTask, HostnameTask, Task
 from wotd.tools import ToolNotFoundError, ToolResult, run_tool
 
 
@@ -63,3 +65,15 @@ class SubdomainsPassiveModule(Module):
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(DomainTask, module_name=SubdomainsPassiveModule.name)
+async def handle_domain_passive(task: DomainTask, ctx: ModuleContext) -> list[Task]:
+    module = SubdomainsPassiveModule(ctx.session, ctx.target, ctx.scope, task=task)
+    await ctx.run_module(module)
+    hosts = await get_subdomain_hosts(ctx.session, ctx.target.id)
+    return [
+        HostnameTask(fqdn=host, parent_task_id=task.id, source_module=module.name)
+        for host in hosts
+    ]
+

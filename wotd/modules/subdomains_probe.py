@@ -9,6 +9,8 @@ from wotd.parsers import parse_jsonl
 from wotd.store import get_unprobed_hosts, upsert_http_services, upsert_tech_detections
 from wotd.tech_map import tech_to_wordlist_key
 from wotd.tools import ToolNotFoundError, run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ResolvedHostTask, Task, TechTag, UrlTask
 
 
 def _str_or_none(value: object) -> str | None:
@@ -47,8 +49,19 @@ def _extract_service(entry: dict[str, Any]) -> dict[str, Any] | None:
 class SubdomainsProbeModule(Module):
     name = "subdomains_probe"
 
+    def __init__(
+        self,
+        session: Any,
+        target: Any,
+        scope: Any,
+        hosts: list[str] | None = None,
+        task: Any | None = None,
+    ) -> None:
+        super().__init__(session, target, scope, task=task)
+        self.hosts = hosts
+
     async def run(self) -> ModuleResult:
-        hosts = await get_unprobed_hosts(self.session, self.target.id)
+        hosts = self.hosts or await get_unprobed_hosts(self.session, self.target.id)
         if not hosts:
             return ModuleResult(
                 module=self.name,
@@ -112,6 +125,51 @@ class SubdomainsProbeModule(Module):
                 "new": new_count,
                 "existing": existing_count,
                 "new_techs": new_techs,
+                "services": services,
                 "errors": errors,
             },
         )
+
+
+@dispatcher.register(
+    ResolvedHostTask,
+    module_name=SubdomainsProbeModule.name,
+    batch=True,
+    buffer_size=50,
+    buffer_seconds=5.0,
+)
+async def handle_resolved_probe(tasks: list[ResolvedHostTask], ctx: ModuleContext) -> list[Task]:
+    hosts = [t.fqdn for t in tasks]
+    module = SubdomainsProbeModule(ctx.session, ctx.target, ctx.scope, hosts=hosts)
+    result = await ctx.run_module(module)
+    services = result.stats.get("services", [])
+    parent_by_host = {t.fqdn: t.id for t in tasks}
+    output: list[Task] = []
+    for svc in services:
+        url = svc.get("url")
+        host = svc.get("host")
+        if not isinstance(url, str) or not url:
+            continue
+        parent_id = parent_by_host.get(str(host))
+        output.append(
+            UrlTask(
+                url=url,
+                host=str(host) if host else None,
+                parent_task_id=parent_id,
+                source_module=module.name,
+            )
+        )
+        tech = svc.get("tech")
+        if isinstance(tech, str) and tech:
+            techs = [t.strip() for t in tech.split(",") if t.strip()]
+            if techs:
+                output.append(
+                    TechTag(
+                        url=url,
+                        techs=techs,
+                        parent_task_id=parent_id,
+                        source_module=module.name,
+                    )
+                )
+    return output
+

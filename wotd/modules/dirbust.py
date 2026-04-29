@@ -13,6 +13,8 @@ from wotd.modules.base import Module, ModuleResult
 from wotd.scope import Scope
 from wotd.store import upsert_dir_results
 from wotd.tools import run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import EndpointTask, Task, UrlTask
 
 _WORDLISTS_PRIMARY = [
     "/opt/wotd/wordlists/httparchive_directories.txt",
@@ -31,8 +33,9 @@ class DirBruteModule(Module):
         scope: Scope,
         base_url: str,
         tech_wordlists: list[str] | None = None,
+        task: object | None = None,
     ) -> None:
-        super().__init__(session, target, scope)
+        super().__init__(session, target, scope, task=task)
         self.base_url = base_url.rstrip("/")
         self.tech_wordlists = tech_wordlists or []
 
@@ -103,3 +106,16 @@ class DirBruteModule(Module):
                 "changed_urls": changed_urls,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=DirBruteModule.name)
+async def handle_url_dirbust(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = DirBruteModule(ctx.session, ctx.target, ctx.scope, task.url, task=task)
+    result = await ctx.run_module(module)
+    new_urls = result.stats.get("new_urls", [])
+    changed_urls = result.stats.get("changed_urls", [])
+    return [
+        EndpointTask(url=url, parent_task_id=task.id, source_module=module.name)
+        for url in list(new_urls) + list(changed_urls)
+    ]
+

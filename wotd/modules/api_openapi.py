@@ -11,6 +11,8 @@ import yaml
 from wotd.modules.base import Module, ModuleResult
 from wotd.store import upsert_api_routes, upsert_api_specs
 from wotd.tools import run_tool
+from wotd.orchestrator import ModuleContext, dispatcher
+from wotd.tasks import ApiRouteTask, ApiSpecTask, Task, UrlTask
 
 
 class ApiOpenApiModule(Module):
@@ -109,8 +111,43 @@ class ApiOpenApiModule(Module):
                 "errors": errors,
                 "specs_new": specs_new,
                 "new_spec_urls": spec_urls,
+                "new_route_keys": route_keys,
             },
         )
+
+
+@dispatcher.register(UrlTask, module_name=ApiOpenApiModule.name)
+async def handle_url_api_openapi(task: UrlTask, ctx: ModuleContext) -> list[Task]:
+    module = ApiOpenApiModule(ctx.session, ctx.target, ctx.scope, task=task)
+    result = await ctx.run_module(module)
+    spec_urls = result.stats.get("new_spec_urls", [])
+    route_keys = result.stats.get("new_route_keys", [])
+    output: list[Task] = []
+    for spec_url in spec_urls:
+        if isinstance(spec_url, str):
+            output.append(
+                ApiSpecTask(
+                    spec_url=spec_url,
+                    parent_task_id=task.id,
+                    source_module=module.name,
+                )
+            )
+    for key in route_keys:
+        if not isinstance(key, str):
+            continue
+        parts = key.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        method, url = parts
+        output.append(
+            ApiRouteTask(
+                url=url,
+                method=method,
+                parent_task_id=task.id,
+                source_module=module.name,
+            )
+        )
+    return output
 
     async def _discover_specs(self, base_url: str) -> list[str]:
         """Step 1: Discovery via ffuf with openapi_paths.txt."""

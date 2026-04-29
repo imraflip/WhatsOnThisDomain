@@ -28,6 +28,7 @@ from wotd.models import (
     ServiceScreenshot,
     Subdomain,
     SubdomainCandidate,
+    TaskRunLog,
     Target,
     TechDetection,
     VhostService,
@@ -291,6 +292,33 @@ async def finish_scan_run(
     scan_run.status = status
     if summary:
         scan_run.summary = json.dumps(summary)
+    await session.commit()
+
+
+async def log_task_run(
+    session: AsyncSession,
+    *,
+    task_id: str,
+    parent_task_id: str | None,
+    source_module: str | None,
+    input_hash: str,
+    output_count: int,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime | None,
+) -> None:
+    session.add(
+        TaskRunLog(
+            task_id=task_id,
+            parent_task_id=parent_task_id,
+            source_module=source_module,
+            input_hash=input_hash,
+            output_count=output_count,
+            status=status,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+    )
     await session.commit()
 
 
