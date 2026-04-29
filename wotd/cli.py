@@ -3107,6 +3107,51 @@ _EXAMPLES = """\
   set WOTD_NOTIFY_SMTP_* vars for email delivery
 """
 
+@app.command("scan")
+@handle_errors
+def scan(
+    target: str = typer.Argument(
+        ...,
+        help=(
+            "Domain or URL to scan. A bare domain (acme.com) runs the full suite; "
+            "a URL (https://app.acme.com) skips subdomain enumeration; "
+            "a path URL (https://acme.com/admin) restricts crawl/brute to that prefix."
+        ),
+    ),
+    notify: bool = typer.Option(
+        False, "--notify", help="Send notifications after the scan finishes."
+    ),
+) -> None:
+    """Run the full recon pipeline with scope-aware tool selection."""
+    from wotd.orchestrator import InputRouter, ReconPipeline
+
+    routed = InputRouter.classify(target)
+    console.print(
+        f"[bold]scope:[/bold] {routed.scope_type.value}  "
+        f"[bold]root:[/bold] {routed.root_domain}"
+    )
+    if routed.path_prefix:
+        console.print(f"[bold]path prefix:[/bold] {routed.path_prefix}")
+    console.print()
+
+    pipeline = ReconPipeline(routed, notify=notify)
+    report = asyncio.run(pipeline.run())
+
+    ok_count = sum(1 for r in report.results if r.ok)
+    fail_count = len(report.failed)
+    console.print()
+    console.print(
+        Panel(
+            f"[green]{ok_count} succeeded[/green]  "
+            f"[red]{fail_count} failed[/red]",
+            title="scan complete",
+        )
+    )
+    if report.failed:
+        for r in report.failed:
+            console.print(f"  [red]✗[/red] {r.tool}: {r.error}")
+
+
 @app.command("examples")
 @app.command("cheat-sheet")
 def examples() -> None:

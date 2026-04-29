@@ -102,6 +102,9 @@ class HttpService(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    scan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_runs.id"), nullable=True, default=None
+    )
 
 
 class Endpoint(Base):
@@ -123,6 +126,7 @@ class Endpoint(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    is_out_of_scope: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class JsFile(Base):
